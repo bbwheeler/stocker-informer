@@ -1,4 +1,4 @@
-module github.com/example/tsx-informer
+module github.com/example/stocker-informer
 
 go 1.25.0
 

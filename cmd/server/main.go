@@ -1,4 +1,4 @@
-// Command tsx-informer periodically queries tsx-history for top scoring stocks
+// Command stocker-informer periodically queries tsx-history for top scoring stocks
 // and publishes the results on a GoToSocial instance.
 package main
 
@@ -13,9 +13,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/example/tsx-informer/internal/config"
-	"github.com/example/tsx-informer/internal/informer"
-	"github.com/example/tsx-informer/internal/messenger"
+	"github.com/example/stocker-informer/internal/config"
+	"github.com/example/stocker-informer/internal/informer"
+	"github.com/example/stocker-informer/internal/messenger"
 
 	tsxhistoryv1 "github.com/example/tsx-history/gen/tsx/v1"
 )

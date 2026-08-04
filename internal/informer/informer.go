@@ -7,7 +7,7 @@ import (
 	"time"
 
 	tsxhistoryv1 "github.com/example/tsx-history/gen/tsx/v1"
-	"github.com/example/tsx-informer/internal/messenger"
+	"github.com/example/stocker-informer/internal/messenger"
 	"google.golang.org/grpc"
 )
 

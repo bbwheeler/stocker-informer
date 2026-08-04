@@ -1,10 +1,10 @@
-# tsx-informer
+# stocker-informer
 
 Go CLI daemon that queries tsx-history gRPC service and publishes top stocks to GoToSocial.
 
 ## Key facts
 
-- **Module**: `github.com/example/tsx-informer` | **Go**: 1.25
+- **Module**: `github.com/example/stocker-informer` | **Go**: 1.25
 - **Build/run**: `go build ./cmd/server/` | **Test**: `go test ./...`
 - **Local dependency**: `../tsx-history` via `replace` in go.mod — must exist or module resolution fails
 
