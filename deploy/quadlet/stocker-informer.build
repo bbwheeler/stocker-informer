@@ -1,0 +1,3 @@
+[Build]
+Containerfile=/opt/stocker-informer/Containerfile
+Image=localhost/stocker-informer:latest
