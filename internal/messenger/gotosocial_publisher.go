@@ -36,11 +36,11 @@ func NewGoToSocialPublisher(instance, username, token string, log *slog.Logger) 
 	}
 }
 
-func (p *GoToSocialPublisher) Publish(ctx context.Context, msg Message) error {
+func (p *GoToSocialPublisher) Publish(ctx context.Context, text string) error {
 	endpoint := p.instance + "/api/v1/statuses"
 
 	form := url.Values{}
-	form.Set("status", msg.Text)
+	form.Set("status", text)
 	form.Set("visibility", "public")
 	form.Set("in_reply_to_id", "")
 

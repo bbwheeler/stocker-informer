@@ -1,50 +1,26 @@
 package messenger
 
-import (
-	"context"
-	"time"
+import "context"
+import "time"
 
-	tsxhistoryv1 "github.com/example/tsx-history/gen/tsx/v1"
-)
-
-type MessageType string
-
-const (
-	TopStocksMessageType MessageType = "top_stocks"
-)
-
-type Message struct {
-	Type MessageType
-	Text string
+// StockEvent represents a single stock update received from Kafka.
+type StockEvent struct {
+	Symbol         string    `json:"symbol"`
+	CompanyName    string    `json:"company_name,omitempty"`
+	Exchange       string    `json:"exchange"`
+	Currency       string    `json:"currency"`
+	Price          float64   `json:"price"`
+	ChangePercent  float64   `json:"change_percent,omitempty"`
+	SentimentScore float64   `json:"sentiment_score,omitempty"`
+	Timestamp      time.Time `json:"timestamp"`
 }
 
-type StockData struct {
-	Type      MessageType
-	FetchedAt time.Time
-	Stocks    []StockInfo
+// Formatter produces formatted text from a single stock event.
+type Formatter interface {
+	Format(event *StockEvent) string
 }
 
-type StockInfo struct {
-	Symbol        string
-	CompanyName   string
-	Exchange      string
-	Currency      string
-	Financials    float64
-	Sentiment     float64
-	Leadership    float64
-	TypeSentiment float64
-	EvaluatedAt   time.Time
-	WeightedScore float64
-	Rank          int
-}
-
-type Messenger interface {
-	Name() string
-	MessageType() MessageType
-	CreateMessage(stocks []*tsxhistoryv1.StockSnapshot, maxResults int) *StockData
-	Format(data *StockData) string
-}
-
+// Publisher posts text to an external service (e.g., GoToSocial).
 type Publisher interface {
-	Publish(ctx context.Context, msg Message) error
+	Publish(ctx context.Context, text string) error
 }
