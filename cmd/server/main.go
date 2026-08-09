@@ -1,5 +1,3 @@
-// Command stocker-informer periodically queries tsx-history for top scoring stocks
-// and publishes the results on a GoToSocial instance.
 package main
 
 import (
@@ -10,14 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
 	"github.com/example/stocker-informer/internal/config"
-	"github.com/example/stocker-informer/internal/informer"
+	"github.com/example/stocker-informer/internal/kafka"
 	"github.com/example/stocker-informer/internal/messenger"
-
-	tsxhistoryv1 "github.com/example/tsx-history/gen/tsx/v1"
 )
 
 func main() {
@@ -38,14 +31,6 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	conn, err := grpc.Dial(cfg.HistoryAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return fmt.Errorf("dial history gRPC: %w", err)
-	}
-	defer conn.Close()
-
-	client := tsxhistoryv1.NewHistoryServiceClient(conn)
-
 	publisher := messenger.NewGoToSocialPublisher(
 		cfg.GotoSocialInstance,
 		cfg.GotoSocialUser,
@@ -53,25 +38,19 @@ func run(log *slog.Logger) error {
 		log,
 	)
 
-	messengerInst := messenger.NewTopStocksMessenger(
-		cfg.WeightsFinancials,
-		cfg.WeightsSentiment,
-		cfg.WeightsLeadership,
-		cfg.WeightsTypeSentiment,
-	)
+	var formatter messenger.Formatter = messenger.NewStockEventFormatter()
 
-	infr := informer.New(
-		client,
-		messengerInst,
+	consumer := kafka.New(
+		cfg.KafkaServers(),
+		cfg.KafkaTopic,
+		cfg.KafkaConsumerGroup,
+		formatter,
 		publisher,
-		cfg.MaxResults,
-		cfg.ExchangeFilter,
-		cfg.InformerInterval,
 		log,
 	)
 
-	if err := infr.Run(ctx); err != nil {
-		return fmt.Errorf("informer run: %w", err)
+	if err := consumer.Run(ctx); err != nil && ctx.Err() == nil {
+		return fmt.Errorf("kafka consumer run: %w", err)
 	}
 
 	return nil

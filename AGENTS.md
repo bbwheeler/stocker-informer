@@ -1,25 +1,34 @@
 # stocker-informer
 
-Go CLI daemon that queries tsx-history gRPC service and publishes top stocks to GoToSocial.
+Go CLI daemon that subscribes to a Kafka topic of stock events and publishes them to GoToSocial.
 
 ## Key facts
 
 - **Module**: `github.com/example/stocker-informer` | **Go**: 1.25
 - **Build/run**: `go build ./cmd/server/` | **Test**: `go test ./...`
-- **Local dependency**: `../tsx-history` via `replace` in go.mod — must exist or module resolution fails
+- **Kafka dependency**: `github.com/segmentio/kafka-go` in go.mod
 
 ## Structure
 
 ```
 cmd/server/main.go        # entry point
 internal/config/          # config loading (env/struct)
-internal/informer/        # business logic + informer_test.go
-internal/messenger/       # GoToSocial publisher + top-stocks scoring + messenger_test.go
+internal/kafka/           # Kafka consumer + StockEvent decoder
+internal/messenger/       # GoToSocial publisher + stock event formatter
 ```
 
 ## Architecture
 
-`main()` loads config → dials tsx-history via gRPC → creates TopStocksMessenger (weighting) and GoToSocialPublisher → runs Informer loop.
+`main()` loads config → dials GoToSocial via HTTP → subscribes to Kafka topic using StockEventFormatter for message formatting → publishes each stock event directly on GoToSocial.
+
+## Environment variables
+
+- `KAFKA_BOOTSTRAP_SERVERS` — comma-separated Kafka broker addresses (required)
+- `KAFKA_TOPIC` — Kafka topic to subscribe to (required)
+- `KAFKA_CONSUMER_GROUP` — consumer group ID for partition offset tracking (required)
+- `GOTOSOCIAL_INSTANCE` — GoToSocial instance URL (required)
+- `GOTOSOCIAL_USER` — GoToSocial username (required)
+- `GOTOSOCIAL_TOKEN` — GoToSocial auth token (required)
 
 No additional lint, format, or typecheck tooling beyond standard Go conventions.
 

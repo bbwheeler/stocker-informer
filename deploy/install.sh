@@ -36,7 +36,7 @@ systemctl --user daemon-reload
 echo ""
 echo "Done. Next steps:"
 echo ""
-echo "  1. Edit $ENV_DIR/.env.podman and fill in GOTOSOCIAL_INSTANCE, GOTOSOCIAL_USER, GOTOSOCIAL_TOKEN"
+echo "  1. Edit $ENV_DIR/.env.podman and fill in GOTOSOCIAL_INSTANCE, GOTOSOCIAL_USER, GOTOSOCIAL_TOKEN, KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_CONSUMER_GROUP"
 echo ""
 echo "  2. Build the image:"
 echo "       systemctl --user start stocker-informer-build.service"
