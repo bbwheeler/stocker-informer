@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REGISTRY="containers.wheeli.ca"
-IMAGE_NAME="${REGISTRY}/stocker-informer/stocker-informer"
+REGISTRY="git.wheeli.ca"
+IMAGE_NAME="${REGISTRY}/brian/stocker-informer"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-echo "==> Building image from ${PROJECT_DIR}"
-podman build -t stocker-informer:latest -f "${PROJECT_DIR}/Containerfile" "${PROJECT_DIR}"
+echo "==> Building ${IMAGE_NAME} from ${PROJECT_DIR}"
+podman build -t "${IMAGE_NAME}:latest" -f "${PROJECT_DIR}/Containerfile" "${PROJECT_DIR}"
 
 tag_and_push() {
   local tag="$1"
   echo "==> Tagging and pushing ${IMAGE_NAME}:${tag}"
-  podman tag stocker-informer:latest "${IMAGE_NAME}:${tag}"
+  podman tag "${IMAGE_NAME}:latest" "${IMAGE_NAME}:${tag}"
   podman push "${IMAGE_NAME}:${tag}"
 }
 
