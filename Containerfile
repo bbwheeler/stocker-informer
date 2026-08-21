@@ -3,7 +3,6 @@ FROM golang:1.25-bookworm AS build
 WORKDIR /src
 
 COPY . .
-WORKDIR /src/stocker-informer
 
 RUN CGO_ENABLED=0 go build -o /out/stocker-informer ./cmd/server
 

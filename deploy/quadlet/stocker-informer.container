@@ -1,5 +1,5 @@
 [Container]
-Image=localhost/stocker-informer:latest
+Image=git.wheeli.ca/brian/stocker-informer:latest
 EnvironmentFile=%h/.config/stocker-informer/.env.podman
 PodmanArgs=--read-only
 PodmanArgs=--tmpfs=/tmp:rw,noexec,nosuid,size=64m
