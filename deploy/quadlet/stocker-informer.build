@@ -1,3 +1,0 @@
-[Build]
-Containerfile=/opt/stocker-informer/Containerfile
-Image=git.wheeli.ca/brian/stocker-informer:latest
