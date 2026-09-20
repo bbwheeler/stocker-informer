@@ -1,13 +1,16 @@
+[Unit]
+After=network-online.target
+
 [Container]
 Image=git.wheeli.ca/brian/stocker-informer:latest
 EnvironmentFile=%h/.config/stocker-informer/.env.podman
 PodmanArgs=--read-only
 PodmanArgs=--tmpfs=/tmp:rw,noexec,nosuid,size=64m
-AutoUpdate=local
+AutoUpdate=registry
 
 [Service]
 Restart=always
-RestartSec=5
+RestartSec=10
 
 [Install]
 WantedBy=default.target
