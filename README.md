@@ -10,7 +10,7 @@
 - Structured JSON logging via `log/slog` to stdout.
 - `/health` endpoint on `:8080`.
 - Static, non-root distroless container image.
-- Podman quadlet / systemd-user deployment for production.
+- Single rootless podman quadlet (systemd `--user`) deployment; image published to `git.wheeli.ca/brian` via `deploy/push.sh`.
 - Graceful shutdown on `SIGINT` / `SIGTERM`.
 
 ## At a glance
@@ -21,7 +21,7 @@
 | Module | `github.com/example/stocker-informer` |
 | Key dependency | `github.com/segmentio/kafka-go v0.4.47` |
 | Configuration | 6 required environment variables |
-| Build | `go build ./cmd/server/` / `podman build -f Containerfile .` |
+| Build / publish | `go build ./cmd/server/` / `./deploy/push.sh` (→ `podman build` + `podman push` to `git.wheeli.ca/brian/stocker-informer:latest`) |
 | Container base | `golang:1.25-bookworm` build → `gcr.io/distroless/static-debian12` runtime, user `nobody`/`65534` |
 | Registry image | `git.wheeli.ca/brian/stocker-informer:latest` |
 | Logging | JSON to stdout |
@@ -60,8 +60,9 @@ The binary runs until stopped. Press `Ctrl-C` (`SIGINT`); it logs `shutting down
 - A reachable **Kafka** broker with the stock-events topic.
 - A reachable **GoToSocial** instance with a valid auth token.
 - **Container / quadlet deployment:** `podman` (or `docker`) with systemd-user quadlet support; quadlet units live in `/etc/containers/systemd/`.
-- `deploy/publish.sh` requires an existing `podman login` to `git.wheeli.ca`.
-- `deploy/install.sh` requires root (`sudo`).
+- `deploy/push.sh` requires an existing `podman login` to `git.wheeli.ca` (no root/sudo).
+- The service is deployed **rootlessly** as a user systemd quadlet (`systemctl --user`) — no root/sudo at deploy time.
+- The operator hands-writes `~/.config/stocker-informer/.env.podman` (the env file is **not** shipped in this repo).
 
 ## Installation
 
@@ -71,22 +72,9 @@ The binary runs until stopped. Press `Ctrl-C` (`SIGINT`); it logs `shutting down
 git clone https://git.wheeli.ca/brian/stocker-informer
 ```
 
-> **Note:** `go.sum` is not committed to git. Run `go mod download` / `go mod tidy` locally once before relying on `deploy/install.sh` or the container build — both copy/verify module hashes, so the missing `go.sum` can make those steps fail.
+> **Note:** `go.sum` is not committed to git. Run `go mod download` / `go mod tidy` once locally before building the container image — the build resolves module hashes, and a missing `go.sum` in the build context can make the container build fail. (See `deploy/push.sh` for the registry build+push.)
 
-### System install (`deploy/install.sh`)
-
-`deploy/install.sh` (run as root: `sudo ./deploy/install.sh`) uses `set -euo pipefail` and performs the following:
-
-1. Copies to `/opt/stocker-informer/`: `Containerfile`, `go.mod`, `go.sum`, `cmd/`, `internal/`. (If `go.sum` has not been generated locally, this copy step fails.)
-2. Copies the two quadlet units to `/etc/containers/systemd/`.
-3. Copies `.env.podman` to `~/.config/stocker-informer/.env.podman` and `chmod 600` it.
-4. Runs `systemctl --user daemon-reload`.
-5. Prints next steps:
-
-   1. Edit `~/.config/stocker-informer/.env.podman` and fill in `GOTOSOCIAL_INSTANCE`, `GOTOSOCIAL_USER`, `GOTOSOCIAL_TOKEN`, `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_TOPIC`, `KAFKA_CONSUMER_GROUP`.
-   2. Build the image: `systemctl --user start stocker-informer-build.service`
-   3. Enable and start the service: `systemctl --user enable --now stocker-informer.service`
-   4. Check status: `systemctl status stocker-informer` / `podman logs stocker-informer`
+Deployment is a single rootless quadlet plus a registry push — see **Publishing to the registry** (`deploy/push.sh`) and **Running the service → systemd / Podman quadlet**.
 
 ## Building
 
@@ -149,7 +137,7 @@ GOTOSOCIAL_INSTANCE, GOTOSOCIAL_USER, and GOTOSOCIAL_TOKEN are all required
 
 ### Example env file
 
-The shipped `.env.podman` template:
+You author this file yourself (it is **not** shipped in this repo) at `~/.config/stocker-informer/.env.podman`. Sample:
 
 ```
 # Environment variables for Podman deployment (stocker-informer).
@@ -166,7 +154,7 @@ GOTOSOCIAL_USER=
 GOTOSOCIAL_TOKEN=
 ```
 
-The Kafka trio ships with development example values, while the GoToSocial trio ships blank and must be filled in before the service will start.
+Fill in the GoToSocial trio before the service will start; the Kafka value `localhost:9092` is a development-only placeholder.
 
 ## Kafka input schema
 
@@ -232,44 +220,82 @@ It runs until `SIGINT` / `SIGTERM`, then logs `{"level":"INFO","msg":"shutting d
 ### Container
 
 ```bash
-podman run -it --rm --env-file .env.podman --read-only stocker-informer:latest
+podman run -it --rm \
+  --env-file "$HOME/.config/stocker-informer/.env.podman" \
+  stocker-informer:latest
 ```
 
-The quadlet hardened form also adds a scratch `--tmpfs`:
+Hardened form (matches the quadlet; `--read-only` keeps the root FS read-only, `--tmpfs` provides a small scratch `/tmp`):
 
 ```bash
-podman run -it --rm --env-file .env.podman \
+podman run -it --rm \
+  --env-file "$HOME/.config/stocker-informer/.env.podman" \
   --read-only \
   --tmpfs=/tmp:rw,noexec,nosuid,size=64m \
   stocker-informer:latest
 ```
 
-`--read-only` makes the container root filesystem read-only; the `--tmpfs` provides a small scratch `/tmp`.
+### systemd / Podman quadlet (rootless)
 
-### systemd / Podman quadlet
+A **single** unit lives in `deploy/quadlet/`: `stocker-informer.container`. It consumes the registry image (`AutoUpdate=registry` re-pulls a new `:latest` on auto-update) and runs it read-only with a scratch `/tmp`:
 
-Two units in `deploy/quadlet/` (installed to `/etc/containers/systemd/` by `install.sh`):
+- `[Unit]` `After=network-online.target`.
+- `[Container]` `Image=git.wheeli.ca/brian/stocker-informer:latest`, `EnvironmentFile=%h/.config/stocker-informer/.env.podman`, `PodmanArgs=--read-only`, `PodmanArgs=--tmpfs=/tmp:rw,noexec,nosuid,size=64m`, `AutoUpdate=registry`.
+- `[Service]` `Restart=always`, `RestartSec=10`.
+- `[Install]` `WantedBy=default.target` (starts on user login).
 
-- `stocker-informer.build` → generates systemd unit `stocker-informer-build.service` (one-shot image build). `[Build]`: `Containerfile=/opt/stocker-informer/Containerfile`, `Image=git.wheeli.ca/brian/stocker-informer:latest`.
-- `stocker-informer.container` → generates systemd unit `stocker-informer.service` (long-running). `[Container]`: `Image=git.wheeli.ca/brian/stocker-informer:latest`, `EnvironmentFile=%h/.config/stocker-informer/.env.podman`, `PodmanArgs=--read-only`, `PodmanArgs=--tmpfs=/tmp:rw,noexec,nosuid,size=64m`, `AutoUpdate=local`. `[Service]`: `Restart=always`, `RestartSec=5`. `[Install]`: `WantedBy=default.target` (starts on user login).
+There is **no** separate build unit and **no** root install script: the image is built and published by `deploy/push.sh` (below).
 
-Bring-up sequence:
+Setup (rootless, no sudo; the env file is **not** shipped — you create it):
 
 ```bash
-systemctl --user start stocker-informer-build.service
-systemctl --user enable --now stocker-informer.service
-systemctl status stocker-informer
+# 1. Author the config (fill in GOTOSOCIAL_* + KAFKA_* before starting)
+mkdir -p ~/.config/stocker-informer
+nano ~/.config/stocker-informer/.env.podman   # see "Environment Variables" / "Example env file"
+
+# 2. Register the single quadlet with systemd --user
+ln -s "$PWD/deploy/quadlet/stocker-informer.container" \
+      "$HOME/.config/systemd/user/stocker-informer.container"
+systemctl --user daemon-reload
+
+# 3. Enable and start
+systemctl --user enable --now stocker-informer
+
+# 4. Verify
+systemctl --user status stocker-informer
 podman logs stocker-informer
 ```
 
 ## Publishing to the registry
 
-`deploy/publish.sh` (no root required) builds, tags, and pushes to the `git.wheeli.ca` registry. It:
+`deploy/push.sh` (no root required) builds the image from the repo-root `Containerfile` and pushes the `:latest` tag to the `git.wheeli.ca/brian` registry:
 
-- Builds: `podman build -t git.wheeli.ca/brian/stocker-informer:latest -f Containerfile .`
-- Tags and pushes `git.wheeli.ca/brian/stocker-informer:latest` **and** a UTC timestamp tag `git.wheeli.ca/brian/stocker-informer:YYYYMMDDHHMMSS`.
+```bash
+./deploy/push.sh
+```
 
-It requires an existing `podman login` to `git.wheeli.ca` beforehand.
+It runs, equivalently:
+
+- `podman build -t git.wheeli.ca/brian/stocker-informer:latest <repo-root>`
+- `podman push git.wheeli.ca/brian/stocker-informer:latest`
+
+It requires an existing `podman login` to `git.wheeli.ca` beforehand. The pushed `:latest` is exactly the image the quadlet consumes (see **Running the service → systemd / Podman quadlet**).
+
+## Quickstart (Quadlets, end-to-end)
+
+The shortest path to a running, rootless service:
+
+1. **Write the env file** (the file is not shipped — you author it):
+   `mkdir -p ~/.config/stocker-informer` and create `~/.config/stocker-informer/.env.podman` with the six required vars (see **Environment Variables**); fill `GOTOSOCIAL_INSTANCE` / `GOTOSOCIAL_USER` / `GOTOSOCIAL_TOKEN` and `KAFKA_*`.
+
+2. **Build + push the image** to the registry (no root):
+   `./deploy/push.sh`
+
+3. **Register & enable the single quadlet**:
+   `ln -s "$PWD/deploy/quadlet/stocker-informer.container" "$HOME/.config/systemd/user/stocker-informer.container"` then `systemctl --user daemon-reload` then `systemctl --user enable --now stocker-informer`
+
+4. **Verify**:
+   `systemctl --user status stocker-informer` and `podman logs stocker-informer`
 
 ## Operations
 
@@ -333,9 +359,10 @@ Caveats:
 stocker-informer/
 ├── AGENTS.md
 ├── Containerfile
+├── review.md
 ├── go.mod
-├── .env.podman
 ├── README.md
+├── docs/deployment.md
 ├── cmd/server/main.go
 ├── internal/config/config.go
 ├── internal/kafka/consumer.go
@@ -343,23 +370,21 @@ stocker-informer/
 ├── internal/messenger/gotosocial_publisher.go
 ├── internal/messenger/stock_event_formatter.go
 └── deploy/
-    ├── install.sh
-    ├── publish.sh
+    ├── push.sh
     └── quadlet/
-        ├── stocker-informer.build
         └── stocker-informer.container
 ```
 
 ## Known limitations
 
-- `go.sum` is not committed; `deploy/install.sh` copies it and the Containerfile build relies on module hashes, so run `go mod download` / `go mod tidy` once locally before using `install.sh` or the container build, or the copy step can fail.
+- `go.sum` is not committed; run `go mod download` / `go mod tidy` once locally before building the container image (via `deploy/push.sh` or `podman build`), or the container build can fail on unresolved module hashes.
 - The Go module path is a placeholder (`github.com/example/stocker-informer`), not the canonical repo identity.
 - No automated tests are present yet; `go test ./...` is a no-op.
 - The `/health` readiness flag is set to `true` at startup and never cleared (optimistic), and `:8080` is not published to the host by the quadlet unit as deployed.
 - A failed GoToSocial publish is committed and dropped (not redelivered) after the publisher's 3 total attempts.
 - `GOTOSOCIAL_USER` is required by config validation but is not currently referenced by the publish request (authentication is Bearer-token based).
 - No log rotation is configured (JSON logging → stdout/journald, operator-owned).
-- `KAFKA_BOOTSTRAP_SERVERS` in the shipped `.env.podman` defaults to `localhost:9092` (development-only) and must be changed for real deployments.
+- The operator-authored `~/.config/stocker-informer/.env.podman` sample shows `KAFKA_BOOTSTRAP_SERVERS=localhost:9092` (development-only); it is not shipped in this repo and must be changed for real deployments.
 
 ## Getting help
 
