@@ -59,7 +59,7 @@ The binary runs until stopped. Press `Ctrl-C` (`SIGINT`); it logs `shutting down
 - **Local build/run:** Go 1.25 or newer.
 - A reachable **Kafka** broker with the stock-events topic.
 - A reachable **GoToSocial** instance with a valid auth token.
-- **Container / quadlet deployment:** `podman` (or `docker`) with systemd-user quadlet support; quadlet units live in `/etc/containers/systemd/`.
+- **Container / quadlet deployment:** `podman` (the quadlet engine; docker cannot run quadlets) with systemd-user quadlet support; quadlet units live in the user's `~/.config/containers/systemd/` and are registered/enabled via `~/.config/systemd/user/` (`systemctl --user`).
 - `deploy/push.sh` requires an existing `podman login` to `git.wheeli.ca` (no root/sudo).
 - The service is deployed **rootlessly** as a user systemd quadlet (`systemctl --user`) — no root/sudo at deploy time.
 - The operator hands-writes `~/.config/stocker-informer/.env.podman` (the env file is **not** shipped in this repo).
