@@ -44,6 +44,8 @@ func run(log *slog.Logger) error {
 		cfg.GotoSocialInstance,
 		cfg.GotoSocialUser,
 		cfg.GotoSocialToken,
+		cfg.GotoSocialAudience,
+		cfg.GotoSocialRecipient,
 		log,
 	)
 
