@@ -1,0 +1,5 @@
+# Operator env files may contain secrets; never commit them.
+.env
+.env.*
+!.env.example
+!.env.*.example

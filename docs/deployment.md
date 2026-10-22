@@ -8,6 +8,14 @@
 
 **Spec:** The deployment requirements are the user goal in the task brief (items 1–5) and the `stocker-store` reference pattern. This plan is the single source of truth for the target state.
 
+> **Configuration update (2026-10-22):** the service now consumes protobuf
+> `stockstore.v1.Stock`, reads `summary.md` from Garage/S3, and publishes
+> Markdown with a configurable GoToSocial audience. Environment variables,
+> dependencies, and the Containerfile changed; see
+> `docs/stock-summary-gotosocial.md` and the README. Deployment mechanics
+> (single rootless quadlet, `deploy/push.sh`, image name,
+> `~/.config/stocker-informer/.env.podman`) are unchanged.
+
 ## Global Constraints
 
 - **Module:** `github.com/example/stocker-informer`. **Go:** 1.25.
@@ -16,8 +24,8 @@
 - **Registry + image name (single source of truth):** `git.wheeli.ca/brian/stocker-informer:latest`. The quadlet's `Image=` and `push.sh`'s pushed name MUST match this verbatim.
 - **User config path (single source of truth):** `~/.config/stocker-informer/.env.podman` (the quadlet references it as `%h/.config/stocker-informer/.env.podman`).
 - **`push.sh` MUST be mode `0755`** (executable). The quadlet MUST be mode `0644`.
-- **Six required env vars** (all validated non-empty; empty → the app exits `1`): `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_TOPIC`, `KAFKA_CONSUMER_GROUP`, `GOTOSOCIAL_INSTANCE`, `GOTOSOCIAL_USER`, `GOTOSOCIAL_TOKEN`.
-- **Do not modify** `Containerfile` (keep as-is), `cmd/`, or `internal/`.
+- **Configuration:** superseded by `docs/stock-summary-gotosocial.md` §3. The service now requires nine variables (`KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_TOPIC`, `KAFKA_CONSUMER_GROUP`, `GOTOSOCIAL_INSTANCE`, `GOTOSOCIAL_USER`, `GOTOSOCIAL_TOKEN`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) plus six optional ones; see that plan and the README for the current list. This document's historical six-variable list below applies only to the superseded deployment task list.
+- **Source changes:** this plan's "do not modify `Containerfile`, `cmd/`, or `internal/`" constraint applied to the deployment-only work. The stock summary feature updated the `Containerfile` (module caching, `GOPRIVATE`) and `cmd/`/`internal/`; see `docs/stock-summary-gotosocial.md` for the current target state.
 - **After all tasks:** the working tree must be `git status`-clean in spirit (no stray/new files except `docs/deployment.md`), and no references to `install.sh`, `publish.sh`, or `stocker-informer.build` may remain in any tracked `*.md` except historical mentions inside `review.md` (see Task 18).
 
 ---
