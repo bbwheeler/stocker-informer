@@ -162,11 +162,19 @@ func (c *Consumer) handleMessage(ctx context.Context, msg kafka.Message, commit 
 	c.log.Info("summary published on GoToSocial", "symbol", identity.Symbol, "exchange", identity.Exchange, "offset", msg.Offset)
 }
 
-func (c *Consumer) commitWithRetries(ctx context.Context, reader *kafka.Reader, msgs ...kafka.Message) {
+// offsetCommitter commits consumed offsets. *kafka.Reader satisfies it; the
+// interface keeps the retry and abandon behaviour testable without a broker.
+type offsetCommitter interface {
+	CommitMessages(ctx context.Context, msgs ...kafka.Message) error
+}
+
+func (c *Consumer) commitWithRetries(ctx context.Context, committer offsetCommitter, msgs ...kafka.Message) {
 	for i := 0; i < defaultCommitRetries; i++ {
-		if err := reader.CommitMessages(ctx, msgs...); err != nil {
-			c.log.Error("commit kafka offsets failed (attempt %d/%d)", "error", err, "attempt", i+1, "max_attempts", defaultCommitRetries)
-			time.Sleep(100 * time.Millisecond)
+		if err := committer.CommitMessages(ctx, msgs...); err != nil {
+			c.log.Error("commit kafka offsets failed", "error", err, "attempt", i+1, "max_attempts", defaultCommitRetries)
+			if i < defaultCommitRetries-1 {
+				time.Sleep(100 * time.Millisecond)
+			}
 			continue
 		}
 		return

@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -259,5 +260,75 @@ func TestHandleMessagePassesTrimmedIdentity(t *testing.T) {
 	}
 	if got := summaries.requests[0]; got.exchange != "NASDAQ" || got.symbol != "AAPL" {
 		t.Errorf("store request = %+v, want trimmed exchange NASDAQ symbol AAPL", got)
+	}
+}
+
+// fakeCommitter records commit calls and fails the first failTimes attempts.
+type fakeCommitter struct {
+	failures int
+	calls    int
+	commits  []kafka.Message
+}
+
+func (f *fakeCommitter) CommitMessages(_ context.Context, msgs ...kafka.Message) error {
+	f.calls++
+	f.commits = append(f.commits, msgs...)
+	if f.calls <= f.failures {
+		return errors.New("broker unavailable")
+	}
+	return nil
+}
+
+// newCapturingConsumer returns a consumer whose log output is written to buf.
+func newCapturingConsumer(buf *bytes.Buffer) *Consumer {
+	return New(
+		[]string{"localhost:9092"}, "topic", "group",
+		&fakeSummaries{}, &fakePublisher{},
+		slog.New(slog.NewTextHandler(buf, nil)),
+	)
+}
+
+func TestCommitWithRetriesRetriesThenSucceeds(t *testing.T) {
+	var buf bytes.Buffer
+	c := newCapturingConsumer(&buf)
+	committer := &fakeCommitter{failures: 1}
+
+	c.commitWithRetries(context.Background(), committer, kafka.Message{Offset: 7})
+
+	if committer.calls != 2 {
+		t.Errorf("commit attempts = %d, want 2 (one failure then success)", committer.calls)
+	}
+	if len(committer.commits) != 2 || committer.commits[0].Offset != 7 {
+		t.Errorf("committed messages = %v, want two copies of offset 7", committer.commits)
+	}
+	if strings.Contains(buf.String(), "abandoning commit after max retries") {
+		t.Errorf("log must not abandon a commit that eventually succeeded:\n%s", buf.String())
+	}
+	assertLogHasNoFormatVerbs(t, &buf, "commit succeeded after retry")
+}
+
+func TestCommitWithRetriesAbandonsAfterMaxAttempts(t *testing.T) {
+	var buf bytes.Buffer
+	c := newCapturingConsumer(&buf)
+	committer := &fakeCommitter{failures: defaultCommitRetries + 1}
+
+	c.commitWithRetries(context.Background(), committer, kafka.Message{Offset: 9})
+
+	if committer.calls != defaultCommitRetries {
+		t.Errorf("commit attempts = %d, want %d", committer.calls, defaultCommitRetries)
+	}
+	if !strings.Contains(buf.String(), "abandoning commit after max retries") {
+		t.Errorf("log missing abandon line:\n%s", buf.String())
+	}
+	assertLogHasNoFormatVerbs(t, &buf, "commit kept failing")
+}
+
+// assertLogHasNoFormatVerbs guards against printf-style verbs leaking into
+// slog messages: slog renders messages literally, so "%d" would appear verbatim
+// instead of the structured attribute value.
+func assertLogHasNoFormatVerbs(t *testing.T, buf *bytes.Buffer, context string) {
+	t.Helper()
+	if strings.Contains(buf.String(), "%d") || strings.Contains(buf.String(), "%s") {
+		t.Errorf("%s: log output contains raw printf verbs:\n%s", context, buf.String())
 	}
 }
