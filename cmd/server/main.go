@@ -13,6 +13,7 @@ import (
 	"github.com/example/stocker-informer/internal/config"
 	"github.com/example/stocker-informer/internal/kafka"
 	"github.com/example/stocker-informer/internal/messenger"
+	"github.com/example/stocker-informer/internal/summarystore"
 )
 
 var (
@@ -38,7 +39,21 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	ctx, _ := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	log.Info("configuration loaded",
+		"kafka_topic", cfg.KafkaTopic,
+		"s3_endpoint", cfg.S3.Endpoint,
+		"s3_bucket", cfg.S3.Bucket,
+		"audience", cfg.GotoSocialAudience,
+	)
+
+	store, err := summarystore.New(&cfg.S3)
+	if err != nil {
+		return fmt.Errorf("create summary store: %w", err)
+	}
+	defer func() { _ = store.Close() }()
 
 	publisher := messenger.NewGoToSocialPublisher(
 		cfg.GotoSocialInstance,
@@ -49,13 +64,11 @@ func run(log *slog.Logger) error {
 		log,
 	)
 
-	var formatter messenger.Formatter = messenger.NewStockEventFormatter()
-
 	consumer := kafka.New(
 		cfg.KafkaServers(),
 		cfg.KafkaTopic,
 		cfg.KafkaConsumerGroup,
-		formatter,
+		store,
 		publisher,
 		log,
 	)
@@ -82,7 +95,9 @@ func run(log *slog.Logger) error {
 		}
 	}()
 
-	consumer.Run(ctx)
+	if err := consumer.Run(ctx); err != nil {
+		return fmt.Errorf("run consumer: %w", err)
+	}
 
 	log.Info("shutting down")
 	return nil
