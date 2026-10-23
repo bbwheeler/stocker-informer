@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,46 +178,193 @@ func TestReadSummaryCanonical(t *testing.T) {
 	}
 }
 
-func TestReadSummaryRootedFallback(t *testing.T) {
-	body := []byte("rooted summary")
-	api := &fakeAPI{fn: func(_ context.Context, _ string, call int) (*s3.GetObjectOutput, error) {
-		if call == 0 {
-			return nil, &types.NoSuchKey{}
-		}
-		return objectOutput(body), nil
-	}}
-	c := newTestClient(t, api, "", time.Second)
+func TestReadSummaryNotFound(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{"no prefix", "", "NASDAQ/AAPL/summary.md"},
+		{"prefixed", "corp/", "corp/NASDAQ/AAPL/summary.md"},
+	}
 
-	got, err := c.ReadSummary(context.Background(), "nasdaq", "aapl")
-	if err != nil {
-		t.Fatalf("ReadSummary: %v", err)
-	}
-	if !bytes.Equal(got, body) {
-		t.Errorf("body = %q, want %q", got, body)
-	}
-	want := []string{"NASDAQ/AAPL/summary.md", "/NASDAQ/AAPL/summary.md"}
-	if keys := api.keys(); !slices.Equal(keys, want) {
-		t.Errorf("requested keys = %v, want %v", keys, want)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeAPI{fn: func(_ context.Context, _ string, _ int) (*s3.GetObjectOutput, error) {
+				return nil, &types.NoSuchKey{}
+			}}
+			c := newTestClient(t, api, tc.prefix, time.Second)
+
+			_, err := c.ReadSummary(context.Background(), "nasdaq", "aapl")
+			if err == nil {
+				t.Fatal("ReadSummary returned no error")
+			}
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("error %v does not satisfy errors.Is(err, ErrNotFound)", err)
+			}
+			if keys := api.keys(); len(keys) != 1 || keys[0] != tc.want {
+				t.Errorf("requested keys = %v, want exactly [%s]", keys, tc.want)
+			}
+		})
 	}
 }
 
-func TestReadSummaryBothMissing(t *testing.T) {
-	api := &fakeAPI{fn: func(_ context.Context, _ string, _ int) (*s3.GetObjectOutput, error) {
-		return nil, &types.NoSuchKey{}
-	}}
-	c := newTestClient(t, api, "", time.Second)
+// TestReadSummaryKeysAreBucketRelativeUnderEveryPrefix locks in the key
+// contract for every S3_PATH_PREFIX spelling: each ReadSummary call issues
+// exactly one GET, and every requested key is the hand-derived canonical
+// bucket-relative key — never rooted, never doubled.
+//
+// The break it catches: rooting BuildKey or re-adding the rooted retry
+// ("/" + key) would put a leading slash in a requested key or add a second
+// GET on the miss leg.
+func TestReadSummaryKeysAreBucketRelativeUnderEveryPrefix(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{"empty prefix", "", "NASDAQ/AAPL/summary.md"},
+		{"rooted prefix", "/corp/", "corp/NASDAQ/AAPL/summary.md"},
+		{"rooted doubled prefix", "//corp//stocks//", "corp/stocks/NASDAQ/AAPL/summary.md"},
+	}
+	const body = "# AAPL\n\nSome summary.\n"
 
-	_, err := c.ReadSummary(context.Background(), "nasdaq", "aapl")
-	if err == nil {
-		t.Fatal("ReadSummary returned no error")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// call 0: canonical hit; call 1: canonical miss.
+			api := &fakeAPI{fn: func(_ context.Context, _ string, call int) (*s3.GetObjectOutput, error) {
+				if call == 0 {
+					return objectOutput([]byte(body)), nil
+				}
+				return nil, &types.NoSuchKey{}
+			}}
+			c := newTestClient(t, api, tc.prefix, time.Second)
+
+			got, err := c.ReadSummary(context.Background(), "nasdaq", "aapl")
+			if err != nil {
+				t.Fatalf("ReadSummary (hit): %v", err)
+			}
+			if string(got) != body {
+				t.Errorf("body = %q, want %q", got, body)
+			}
+			if _, err := c.ReadSummary(context.Background(), "nasdaq", "aapl"); !errors.Is(err, ErrNotFound) {
+				t.Errorf("ReadSummary (miss) error = %v, want errors.Is(err, ErrNotFound)", err)
+			}
+
+			keys := api.keys()
+			if len(keys) != 2 {
+				t.Fatalf("requested keys = %v, want exactly two single-GET calls", keys)
+			}
+			for i, key := range keys {
+				if strings.HasPrefix(key, "/") {
+					t.Errorf("GET %d key = %q, want a bucket-relative key with no leading %q", i+1, key, "/")
+				}
+				if key != tc.want {
+					t.Errorf("GET %d key = %q, want %q", i+1, key, tc.want)
+				}
+			}
+		})
 	}
-	if !errors.Is(err, ErrNotFound) {
-		t.Errorf("error %v does not satisfy errors.Is(err, ErrNotFound)", err)
+}
+
+// keyResolveAPI is a minimal bucket fake whose GetObject resolves the
+// requested key to a stored key through an injected function, modelling the
+// key semantics of the two supported backends. It records every requested
+// key so tests can assert call counts and exact spellings.
+type keyResolveAPI struct {
+	objects map[string][]byte
+	resolve func(key string) string
+	gets    []string
+}
+
+func (a *keyResolveAPI) GetObject(_ context.Context, in *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	key := aws.ToString(in.Key)
+	a.gets = append(a.gets, key)
+	body, ok := a.objects[a.resolve(key)]
+	if !ok {
+		return nil, &types.NoSuchKey{}
 	}
-	want := []string{"NASDAQ/AAPL/summary.md", "/NASDAQ/AAPL/summary.md"}
-	if keys := api.keys(); !slices.Equal(keys, want) {
-		t.Errorf("requested keys = %v, want %v", keys, want)
-	}
+	return objectOutput(body), nil
+}
+
+// TestReadSummaryBackendKeySemantics pins the key-spelling contract against
+// both supported backends.
+//
+// The break it catches: reintroducing a rooted read (rooted BuildKey or the
+// removed "/" + key fallback) makes the AWS case serve a rooted legacy
+// object instead of reporting ErrNotFound, and puts a rooted key or a second
+// GET on the wire in both cases.
+func TestReadSummaryBackendKeySemantics(t *testing.T) {
+	const (
+		canonicalKey = "NASDAQ/AAPL/summary.md"
+		rootedKey    = "/" + canonicalKey
+		body         = "# AAPL\n"
+	)
+
+	// Garage (<= v2.4.1) derives the stored key from the URL path with the
+	// leading slash trimmed, so rooted and unrooted request keys resolve to
+	// the same object: the removed rooted retry was redundant here — when the
+	// canonical GET 404s, the rooted retry addresses an identical, equally
+	// absent object and can never return data.
+	t.Run("garage trims leading slash", func(t *testing.T) {
+		api := &keyResolveAPI{
+			objects: map[string][]byte{canonicalKey: []byte(body)},
+			resolve: func(key string) string { return strings.TrimLeft(key, "/") },
+		}
+		c := newTestClient(t, api, "", time.Second)
+
+		got, err := c.ReadSummary(context.Background(), "nasdaq", "aapl")
+		if err != nil {
+			t.Fatalf("ReadSummary: %v", err)
+		}
+		if string(got) != body {
+			t.Errorf("body = %q, want %q", got, body)
+		}
+		if len(api.gets) != 1 || api.gets[0] != canonicalKey {
+			t.Errorf("requested keys = %v, want exactly [%s]", api.gets, canonicalKey)
+		}
+
+		// Characterization of the fake's Garage model: a rooted request
+		// resolves to the same stored object as the canonical one, which is
+		// why the fallback could never succeed when the canonical GET did not.
+		out, err := api.GetObject(context.Background(), &s3.GetObjectInput{
+			Bucket: aws.String("stocker"),
+			Key:    aws.String(rootedKey),
+		})
+		if err != nil {
+			t.Fatalf("rooted GetObject against the Garage model: %v", err)
+		}
+		probed, err := io.ReadAll(out.Body)
+		_ = out.Body.Close()
+		if err != nil {
+			t.Fatalf("read rooted probe body: %v", err)
+		}
+		if string(probed) != body {
+			t.Errorf("rooted probe body = %q, want %q (same object as the canonical key)", probed, body)
+		}
+		if len(api.gets) != 2 || api.gets[1] != rootedKey {
+			t.Errorf("recorded keys = %v, want the rooted probe at %q", api.gets, rootedKey)
+		}
+	})
+
+	// AWS S3 keeps the leading slash as a key byte, so a rooted object is a
+	// distinct object the canonical read must not reach: rooted keys are
+	// non-portable and must never be requested.
+	t.Run("aws treats keys literally", func(t *testing.T) {
+		api := &keyResolveAPI{
+			objects: map[string][]byte{rootedKey: []byte(body)}, // rooted-only legacy object
+			resolve: func(key string) string { return key },
+		}
+		c := newTestClient(t, api, "", time.Second)
+
+		_, err := c.ReadSummary(context.Background(), "nasdaq", "aapl")
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("ReadSummary error = %v, want errors.Is(err, ErrNotFound) for the rooted-only object", err)
+		}
+		if len(api.gets) != 1 || api.gets[0] != canonicalKey {
+			t.Errorf("requested keys = %v, want exactly [%s]", api.gets, canonicalKey)
+		}
+	})
 }
 
 func TestReadSummaryStorageErrorNoFallback(t *testing.T) {
@@ -235,27 +382,6 @@ func TestReadSummaryStorageErrorNoFallback(t *testing.T) {
 	}
 	if keys := api.keys(); len(keys) != 1 {
 		t.Errorf("requested keys = %v, want a single canonical GET", keys)
-	}
-}
-
-func TestReadSummaryRootedStorageError(t *testing.T) {
-	api := &fakeAPI{fn: func(_ context.Context, _ string, call int) (*s3.GetObjectOutput, error) {
-		if call == 0 {
-			return nil, &statusError{code: http.StatusNotFound}
-		}
-		return nil, &statusError{code: http.StatusInternalServerError}
-	}}
-	c := newTestClient(t, api, "", time.Second)
-
-	_, err := c.ReadSummary(context.Background(), "nasdaq", "aapl")
-	if err == nil {
-		t.Fatal("ReadSummary returned no error")
-	}
-	if errors.Is(err, ErrNotFound) {
-		t.Errorf("error %v must not satisfy errors.Is(err, ErrNotFound)", err)
-	}
-	if keys := api.keys(); len(keys) != 2 {
-		t.Errorf("requested keys = %v, want a canonical GET and a rooted GET", keys)
 	}
 }
 
