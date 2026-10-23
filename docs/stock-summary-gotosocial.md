@@ -47,8 +47,7 @@ stocker-informer
   ├─ proto.Unmarshal → stockstorev1.Stock
   ├─ validate symbol + exchange non-empty
   ├─ summarystore.ReadSummary(ctx, "NASDAQ", "AAPL")
-  │    ├─ GET  NASDAQ/AAPL/summary.md          (canonical)
-  │    └─ GET  /NASDAQ/AAPL/summary.md         (only on definitive not-found)
+  │    └─ GET  NASDAQ/AAPL/summary.md          (canonical, single GET)
   └─ messenger.GoToSocialPublisher.Publish(ctx, summaryMarkdown)
        POST {GOTOSOCIAL_INSTANCE}/api/v1/statuses
        form: status, visibility, local_only, content_type=text/markdown
@@ -61,7 +60,7 @@ The record key and headers are ignored. Missing summaries are a warning and a sk
 | Package | Responsibility | Imports allowed |
 | --- | --- | --- |
 | `internal/config` | Read env, apply defaults, validate, normalize recipient. Owns `Audience` and `S3Config`. Leaf package. | stdlib only |
-| `internal/summarystore` | Garage/S3 adapter: key building, canonical + rooted fallback, timeout, `ErrNotFound`. | `internal/config`, AWS SDK, smithy |
+| `internal/summarystore` | Garage/S3 adapter: key building, canonical read, timeout, `ErrNotFound`. | `internal/config`, AWS SDK, smithy |
 | `internal/messenger` | GoToSocial HTTP adapter and `Publisher` interface. Audience → form fields. | `internal/config`, stdlib |
 | `internal/kafka` | Consumer loop, protobuf decode, summary dispatch, offset commit. | `internal/messenger`, `internal/summarystore`, `stocker-store/proto/v1`, kafka-go |
 | `cmd/server` | Composition root: config → store → publisher → consumer + health server. | all of the above |
@@ -80,22 +79,29 @@ Dependency direction is one-way: `config` ← `summarystore` / `messenger` ← `
 
 **Validation:** `symbol` and `exchange` are trimmed and both required. The exchange is needed to build the S3 path; a stock without it cannot be resolved.
 
-### D2 — S3 layout and rooted-key fallback match the sibling implementation
+### D2 — S3 layout: canonical bucket-relative keys only
 
-**Decision:** Copy the behavior of `stocker-summary-evaluator/internal/summarystore`:
+**Decision:** Match the sibling implementation's key layout:
 
 - key `[normalized S3_PATH_PREFIX/]{EXCHANGE}/{SYMBOL}/summary.md`
 - exchange and symbol trimmed and upper-cased
-- canonical key never starts with `/`
-- retry exactly once with `"/" + canonical` only when the canonical read is a definitive not-found
-- any other storage error is returned immediately (no fallback)
+- the canonical key is bucket-relative and never starts with `/`
+- `ReadSummary` issues exactly one `GetObject` at that key per call
+- a definitive not-found returns an error wrapping `ErrNotFound`; any other storage error is returned immediately
 - empty exchange/symbol, `/`, or `..` in either segment is rejected before S3 I/O; the prefix is also rejected if it contains `..`
 
-**Why:** `stocker-summarizer` historically wrote rooted keys (`/NASDAQ/AAPL/summary.md`), while the evaluator expects canonical unrooted keys. The fallback is the established compatibility mechanism. Treating a 500/timeout as "not found" would silently mask an outage and double every request.
+**Why canonical-only:** Treating a 500/timeout as "not found" would silently mask an outage. A single unrooted key is also the only representation that behaves the same on both supported backends.
+
+**History:** `stocker-summarizer` once emitted rooted keys (`/NASDAQ/AAPL/summary.md`), so this reader carried a one-shot rooted fallback to straddle both spellings. The summarizer now writes bucket-relative keys (see `stocker-summarizer/docs/plan-garage-key-prefix.md`), so the fallback has nothing legitimate left to catch:
+
+- **Garage ≤ v2.4.1:** the S3 router derives the key from the URL path and trims a leading `/`. `GET /bucket//NASDAQ/AAPL/summary.md` therefore addresses the same stored key as the canonical request — when the canonical GET 404s the retry cannot succeed and only doubles round trips on every miss.
+- **AWS S3:** a leading slash is a literal key byte, so `/NASDAQ/AAPL/summary.md` is a different object. A rooted retry can serve stale legacy data, mask a producer regression, and make behavior backend-dependent.
+
+AWS buckets that really do hold literal rooted objects (inventory them with `aws s3api list-objects-v2 --prefix "/"`) need a one-time copy to unrooted keys; the default Garage deployment needs no migration because old rooted writes were stored trimmed.
 
 ### D3 — AWS SDK v2 with static credentials and path-style addressing
 
-**Decision:** Build the client offline with `awsconfig.LoadDefaultConfig`, a static credentials provider, `BaseEndpoint = S3_ENDPOINT`, and `UsePathStyle = true`. No bucket probe at startup. Apply `S3_TIMEOUT_SECONDS` as a per-`ReadSummary` context deadline covering canonical + fallback.
+**Decision:** Build the client offline with `awsconfig.LoadDefaultConfig`, a static credentials provider, `BaseEndpoint = S3_ENDPOINT`, and `UsePathStyle = true`. No bucket probe at startup. Apply `S3_TIMEOUT_SECONDS` as a per-`ReadSummary` context deadline covering the summary read.
 
 **Why:** Garage is S3-compatible and requires path-style addressing at a custom endpoint. Offline construction keeps startup independent of Garage availability; a fail-fast startup on a transient S3 outage would cause restart loops. The timeout bounds a hung read so the consumer loop cannot stall indefinitely.
 
@@ -206,7 +212,7 @@ Aggregated form: `invalid configuration: <err1>; <err2>`.
 | `go.sum` | Committed module hashes. |
 | `.gitignore` | Ignore local `.env` files while keeping `*.example` files trackable. |
 | `internal/summarystore/store.go` | S3-backed summary reader, key builder, `ErrNotFound`. |
-| `internal/summarystore/store_test.go` | Fake-S3 tests for keys, fallback, traversal, errors, timeout. |
+| `internal/summarystore/store_test.go` | Fake-S3 tests for keys, single canonical GET, traversal, errors, timeout. |
 | `internal/config/config_test.go` | Env validation, defaults, audience, recipient normalization. |
 | `internal/messenger/gotosocial_publisher_test.go` | `httptest.Server` tests for form fields, markdown, retry, status ID. |
 | `internal/messenger/gotosocial_live_test.go` | Opt-in live `local` / `direct` test with cleanup. |
@@ -498,12 +504,10 @@ func (c *Client) Close() error
 - `ReadSummary`:
   1. Build the key.
   2. Apply `cfg.Timeout` as a context deadline when `> 0`.
-  3. `GET` the canonical key.
+  3. `GET` the canonical key — the only GET issued.
   4. On success, return the bytes.
-  5. On a definitive not-found, `GET "/" + canonical`.
-  6. On success, return the rooted bytes.
-  7. On rooted not-found, return an error wrapping `ErrNotFound`.
-  8. On any non-not-found error, return the wrapped error without a fallback.
+  5. On a definitive not-found, return an error wrapping `ErrNotFound`.
+  6. On any non-not-found error, return the wrapped error.
 - Bodies are always closed; a nil response/body is an error.
 - `isNotFound` recognizes `*types.NoSuchKey`, `*types.NotFound`, smithy error codes `NoSuchKey`/`NotFound`, and `HTTPStatusCode() == 404`.
 - Context deadline/cancellation is preferred in the wrapped error.
@@ -518,10 +522,10 @@ func (c *Client) Close() error
    | --- | --- |
    | `TestBuildKey` table | canonical, trim/upper-case, prefix normalization (`corp/`, `/a//b/`), empty exchange, empty symbol, `AA/PL`, `A..`, prefix `..` |
    | `TestReadSummaryCanonical` | one call, bucket and key `NASDAQ/AAPL/summary.md`, body returned, body closed |
-   | `TestReadSummaryRootedFallback` | canonical `NoSuchKey`, second key `/NASDAQ/AAPL/summary.md`, body returned |
-   | `TestReadSummaryBothMissing` | two calls, `errors.Is(err, ErrNotFound)` |
+   | `TestReadSummaryNotFound` | one call at `NASDAQ/AAPL/summary.md`, `errors.Is(err, ErrNotFound)` |
+   | `TestReadSummaryKeysAreBucketRelativeUnderEveryPrefix` | empty, rooted, and doubled prefix spellings each record one bucket-relative key |
+   | `TestReadSummaryBackendKeySemantics` | Garage trims a leading `/` (same object); an AWS-style verbatim key does not reach a rooted-only object |
    | `TestReadSummaryStorageErrorNoFallback` | canonical 500, exactly one call, error not `ErrNotFound` |
-   | `TestReadSummaryRootedStorageError` | canonical 404, rooted 500, two calls, non-not-found error |
    | `TestReadSummaryReadError` | body read fails, error returned |
    | `TestReadSummaryNilBody` | nil body, error returned |
    | `TestReadSummaryTimeout` | fake API waits on `ctx.Done()`, timeout `10ms`, error mentions context/deadline |
@@ -838,7 +842,7 @@ func (c *Consumer) handleMessage(ctx context.Context, msg kafka.Message, commit 
 Rewrite these sections so they describe the actual system:
 
 - **Title/intro:** protobuf stock summaries from Kafka → Garage/S3 `summary.md` → GoToSocial Markdown status.
-- **Key features:** protobuf consumer-group subscription; S3 summary read with rooted-key fallback; full 1000-word summaries (no 500-char truncation); `global`/`local`/`direct` audience; Markdown content type; publish retries; JSON logs; `/health`; distroless image; single rootless quadlet; graceful shutdown.
+- **Key features:** protobuf consumer-group subscription; single canonical S3 summary read; full 1000-word summaries (no 500-char truncation); `global`/`local`/`direct` audience; Markdown content type; publish retries; JSON logs; `/health`; distroless image; single rootless quadlet; graceful shutdown.
 - **At a glance:** Go 1.25, module, dependencies (`kafka-go`, AWS SDK v2 S3, `stocker-store/proto/v1`, protobuf), configuration count (9 required + 6 optional), build/publish, container base, registry image, logging, health, exit codes.
 - **Quick start:** `go build`, then export Kafka + S3 + GoToSocial values. Remove the `go mod tidy`/`go.sum` caveat.
 - **Prerequisites:** Kafka, a Garage/S3 bucket containing summaries, GoToSocial, podman for quadlets.
@@ -858,7 +862,7 @@ Rewrite these sections so they describe the actual system:
   - Only `symbol` and `exchange` are used; both must be non-empty; `scores`, key, and headers are ignored.
   - Topic: `stock.summary.available.v1`; state the producer is `stocker-summarizer`.
   - Decode failures are logged and the offset is committed.
-- **Summary source:** path `[S3_PATH_PREFIX/]{EXCHANGE}/{SYMBOL}/summary.md`; uppercase/trim; canonical unrooted key; rooted fallback only on not-found; other storage errors do not fall back; missing summary is a warning and skip; summary published verbatim as `text/markdown`; no truncation; no extra title or header is added to the summary. Include a short sample `summary.md` and the resulting status.
+- **Summary source:** path `[S3_PATH_PREFIX/]{EXCHANGE}/{SYMBOL}/summary.md`; uppercase/trim; canonical bucket-relative key is the only key read (one GET, a miss returns `ErrNotFound`); other storage errors are returned immediately; missing summary is a warning and skip; summary published verbatim as `text/markdown`; no truncation; no extra title or header is added to the summary. Include a short sample `summary.md` and the resulting status.
 - **Audience configuration:** mapping table from §3.2 and a direct-recipient normalization example (`papa` + `https://wheeli.social` → `papa@wheeli.social`).
 - **Running the service / Operations:** update consumer-behaviour and publisher-behaviour subsections:
   - Consumer decodes protobuf, reads S3, publishes summary.
@@ -874,7 +878,6 @@ Rewrite these sections so they describe the actual system:
   - no log rotation
   - no chunking/threading: an over-limit summary fails and is dropped
   - S3 storage errors are not retried; the message is logged, committed, and skipped
-  - rooted-key fallback runs only after a definitive canonical miss
   - container build needs network and git access to `git.wheeli.ca` (no credentials baked in)
 
 #### AGENTS.md
@@ -1095,7 +1098,6 @@ If the live run is skipped, `GOTOSOCIAL_LIVE_TEST` is not exactly `1` or one of 
 
    ```bash
    aws --endpoint-url "$S3_ENDPOINT" s3 ls "s3://$S3_BUCKET/NASDAQ/AAPL/summary.md"
-   # If only the rooted key exists, the fallback will handle /NASDAQ/AAPL/summary.md.
    ```
 
 2. Produce a protobuf signal. Using the `stocker-store` proto:

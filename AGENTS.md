@@ -16,7 +16,7 @@ Go CLI daemon that consumes protobuf `stockstore.v1.Stock` summary signals from 
 cmd/server/main.go        # entry point / composition root
 internal/config/          # env loading, defaults, validation, audience + recipient
 internal/kafka/           # Kafka consumer + protobuf Stock decoder + dispatch
-internal/summarystore/    # Garage/S3 summary reader (canonical key + rooted fallback)
+internal/summarystore/    # Garage/S3 summary reader (canonical unrooted key only)
 internal/messenger/       # GoToSocial publisher + Publisher interface
 deploy/quadlet/           # single rootless quadlet + .env.podman.example template
 docs/                     # implementation plans (stock-summary-gotosocial.md, deployment.md)

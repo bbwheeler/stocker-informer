@@ -7,7 +7,7 @@ The producer (`stocker-summarizer`) writes the summary object and emits a minima
 ## Key features
 
 - Kafka consumer-group subscription to protobuf `stockstore.v1.Stock` signals, with partition offset tracking so a group resumes where it left off across restarts.
-- Summary reads from Garage/S3 using the canonical key `[S3_PATH_PREFIX/]{EXCHANGE}/{SYMBOL}/summary.md`, with a one-shot rooted-key (`/{key}`) fallback for objects written by the older summarizer layout.
+- Summary reads from Garage/S3 use the canonical bucket-relative key `[S3_PATH_PREFIX/]{EXCHANGE}/{SYMBOL}/summary.md` only; a miss is one GET and returns `ErrNotFound`.
 - Full summaries (up to ~1000 words) are published without truncation.
 - Configurable GoToSocial audience: `global`, `local`, or `direct`.
 - Markdown statuses sent with `content_type=text/markdown`.
@@ -140,7 +140,7 @@ Secret values (`GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) are never i
 | `S3_ACCESS_KEY` | **Required** | **yes** | Static S3 access key. Never logged. |
 | `S3_SECRET_KEY` | **Required** | **yes** | Static S3 secret key. Never logged. |
 | `S3_PATH_PREFIX` | optional, default empty | no | Key prefix placed before `{EXCHANGE}/{SYMBOL}/summary.md`. Leading/trailing slashes are trimmed and empty segments dropped. |
-| `S3_TIMEOUT_SECONDS` | optional, default `10` | no | Per-summary-read timeout in seconds (covers the canonical read plus any fallback). Must parse as an integer and be `> 0`. |
+| `S3_TIMEOUT_SECONDS` | optional, default `10` | no | Per-summary-read timeout in seconds (covers the summary read). Must parse as an integer and be `> 0`. |
 
 ### Validation notes
 
@@ -205,13 +205,13 @@ message ScoreEntry {
 
 - `EXCHANGE` and `SYMBOL` are trimmed and upper-cased.
 - The canonical key never has a leading slash, e.g. `NASDAQ/AAPL/summary.md` (or `corp/NASDAQ/AAPL/summary.md` with `S3_PATH_PREFIX=corp`).
-- A rooted compatibility key (`/NASDAQ/AAPL/summary.md`) is read **only** after the canonical read is a definitive not-found. This covers objects written by the older summarizer layout.
-- Any other storage error (for example a 500 or a timeout) is returned immediately and does **not** trigger the fallback.
+- The canonical key is the only key read; a missing summary returns `ErrNotFound`.
+- Any other storage error (for example a 500 or a timeout) is returned immediately.
 - Identities with `/` or `..` in a segment, or a prefix containing `..`, are rejected before any S3 call.
 
 ### Missing and empty summaries
 
-- A summary that is missing at both keys is a warning (`summary not found`) and a skip, not a retry.
+- A summary that is missing at the canonical key is a warning (`summary not found`) and a skip, not a retry.
 - A summary that trims to empty is a warning (`summary is empty, skipping publish`) and a skip.
 
 ### Publication
@@ -395,7 +395,7 @@ Offsets are committed after every message, in every outcome:
 | Outcome | Log level | Offset |
 | --- | --- | --- |
 | Decode failure | `Error` (`decode stock failed`) | committed |
-| Summary not found at canonical and rooted keys | `Warn` (`summary not found`) | committed |
+| Summary not found | `Warn` (`summary not found`) | committed |
 | S3 storage error (non-not-found) | `Error` (`read summary failed`) | committed |
 | Summary trims to empty | `Warn` (`summary is empty, skipping publish`) | committed |
 | Publish failure after 3 attempts | `Error` (`publish failed`) | committed |
@@ -465,7 +465,7 @@ stocker-informer/
 - No log rotation is configured (JSON logging → stdout/journald, operator-owned).
 - No chunking or threading: a summary larger than the instance's status limit fails validation at GoToSocial, is retried 3 times, and is then dropped.
 - S3 storage errors are not retried; the message is logged, the offset is committed, and the summary is skipped.
-- The rooted-key fallback runs only after a definitive canonical miss; a transient error on the canonical key does not try the rooted key.
+- Summary reads issue a single GET at the canonical key, so a missing summary costs one S3 round trip.
 - The container build needs network and git access to `git.wheeli.ca` to resolve the private `stocker-store` module; no credentials are baked into the image.
 - The operator-authored `~/.config/stocker-informer/.env.podman` is not shipped in this repo; `deploy/quadlet/.env.podman.example` contains placeholders only and must be edited for real deployments.
 
