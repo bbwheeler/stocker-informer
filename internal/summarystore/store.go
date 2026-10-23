@@ -5,9 +5,7 @@
 //
 //	[S3_PATH_PREFIX/]{EXCHANGE}/{SYMBOL}/summary.md
 //
-// The canonical key has no leading slash. Because stocker-summarizer's key
-// helper produced rooted keys, a rooted compatibility key ("/{canonical}") is
-// read only when the canonical key is definitively absent.
+// The canonical key has no leading slash, and it is the only key read.
 package summarystore
 
 import (
@@ -29,8 +27,8 @@ import (
 	"github.com/example/stocker-informer/internal/config"
 )
 
-// ErrNotFound reports that no summary object exists for the requested
-// identity, neither at the canonical key nor at the rooted compatibility key.
+// ErrNotFound reports that no summary object exists at the canonical key for
+// the requested identity.
 var ErrNotFound = errors.New("summarystore: summary not found")
 
 // defaultRegion keeps construction offline: an empty region would make the
@@ -107,9 +105,9 @@ func NewWithAPI(cfg *config.S3Config, api API) (*Client, error) {
 
 // ReadSummary returns the summary bytes for an identity.
 //
-// The canonical key is read first. Only a definitive not-found triggers the
-// rooted compatibility read; every other error is returned immediately. When
-// neither key exists, the error satisfies errors.Is(err, ErrNotFound).
+// It issues a single read at the canonical bucket-relative key. A definitive
+// not-found satisfies errors.Is(err, ErrNotFound); every other error is
+// returned immediately.
 func (c *Client) ReadSummary(ctx context.Context, exchange, symbol string) ([]byte, error) {
 	key, err := BuildKey(c.prefix, exchange, symbol)
 	if err != nil {
@@ -126,20 +124,10 @@ func (c *Client) ReadSummary(ctx context.Context, exchange, symbol string) ([]by
 	if err == nil {
 		return body, nil
 	}
-	if !isNotFound(err) {
-		return nil, wrapReadError(ctx, key, err)
-	}
-
-	// Compatibility layout: the sibling summarizer wrote rooted keys.
-	rooted := "/" + key
-	body, err = c.get(ctx, rooted)
-	if err == nil {
-		return body, nil
-	}
 	if isNotFound(err) {
 		return nil, fmt.Errorf("summarystore: read %q: %w", key, ErrNotFound)
 	}
-	return nil, wrapReadError(ctx, rooted, err)
+	return nil, wrapReadError(ctx, key, err)
 }
 
 // Close releases the client. The SDK client holds no long-lived resources,

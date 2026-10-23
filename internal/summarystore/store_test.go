@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"testing"
 	"time"
 
@@ -178,45 +177,34 @@ func TestReadSummaryCanonical(t *testing.T) {
 	}
 }
 
-func TestReadSummaryRootedFallback(t *testing.T) {
-	body := []byte("rooted summary")
-	api := &fakeAPI{fn: func(_ context.Context, _ string, call int) (*s3.GetObjectOutput, error) {
-		if call == 0 {
-			return nil, &types.NoSuchKey{}
-		}
-		return objectOutput(body), nil
-	}}
-	c := newTestClient(t, api, "", time.Second)
+func TestReadSummaryNotFound(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{"no prefix", "", "NASDAQ/AAPL/summary.md"},
+		{"prefixed", "corp/", "corp/NASDAQ/AAPL/summary.md"},
+	}
 
-	got, err := c.ReadSummary(context.Background(), "nasdaq", "aapl")
-	if err != nil {
-		t.Fatalf("ReadSummary: %v", err)
-	}
-	if !bytes.Equal(got, body) {
-		t.Errorf("body = %q, want %q", got, body)
-	}
-	want := []string{"NASDAQ/AAPL/summary.md", "/NASDAQ/AAPL/summary.md"}
-	if keys := api.keys(); !slices.Equal(keys, want) {
-		t.Errorf("requested keys = %v, want %v", keys, want)
-	}
-}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeAPI{fn: func(_ context.Context, _ string, _ int) (*s3.GetObjectOutput, error) {
+				return nil, &types.NoSuchKey{}
+			}}
+			c := newTestClient(t, api, tc.prefix, time.Second)
 
-func TestReadSummaryBothMissing(t *testing.T) {
-	api := &fakeAPI{fn: func(_ context.Context, _ string, _ int) (*s3.GetObjectOutput, error) {
-		return nil, &types.NoSuchKey{}
-	}}
-	c := newTestClient(t, api, "", time.Second)
-
-	_, err := c.ReadSummary(context.Background(), "nasdaq", "aapl")
-	if err == nil {
-		t.Fatal("ReadSummary returned no error")
-	}
-	if !errors.Is(err, ErrNotFound) {
-		t.Errorf("error %v does not satisfy errors.Is(err, ErrNotFound)", err)
-	}
-	want := []string{"NASDAQ/AAPL/summary.md", "/NASDAQ/AAPL/summary.md"}
-	if keys := api.keys(); !slices.Equal(keys, want) {
-		t.Errorf("requested keys = %v, want %v", keys, want)
+			_, err := c.ReadSummary(context.Background(), "nasdaq", "aapl")
+			if err == nil {
+				t.Fatal("ReadSummary returned no error")
+			}
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("error %v does not satisfy errors.Is(err, ErrNotFound)", err)
+			}
+			if keys := api.keys(); len(keys) != 1 || keys[0] != tc.want {
+				t.Errorf("requested keys = %v, want exactly [%s]", keys, tc.want)
+			}
+		})
 	}
 }
 
@@ -235,27 +223,6 @@ func TestReadSummaryStorageErrorNoFallback(t *testing.T) {
 	}
 	if keys := api.keys(); len(keys) != 1 {
 		t.Errorf("requested keys = %v, want a single canonical GET", keys)
-	}
-}
-
-func TestReadSummaryRootedStorageError(t *testing.T) {
-	api := &fakeAPI{fn: func(_ context.Context, _ string, call int) (*s3.GetObjectOutput, error) {
-		if call == 0 {
-			return nil, &statusError{code: http.StatusNotFound}
-		}
-		return nil, &statusError{code: http.StatusInternalServerError}
-	}}
-	c := newTestClient(t, api, "", time.Second)
-
-	_, err := c.ReadSummary(context.Background(), "nasdaq", "aapl")
-	if err == nil {
-		t.Fatal("ReadSummary returned no error")
-	}
-	if errors.Is(err, ErrNotFound) {
-		t.Errorf("error %v must not satisfy errors.Is(err, ErrNotFound)", err)
-	}
-	if keys := api.keys(); len(keys) != 2 {
-		t.Errorf("requested keys = %v, want a canonical GET and a rooted GET", keys)
 	}
 }
 
