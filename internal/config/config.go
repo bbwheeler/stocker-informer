@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -100,6 +101,12 @@ func Load() (*Config, error) {
 		add("KAFKA_BOOTSTRAP_SERVERS is required and must be non-empty")
 	} else if len(cfg.KafkaServers()) == 0 {
 		add("KAFKA_BOOTSTRAP_SERVERS must contain at least one non-empty broker")
+	} else {
+		for _, entry := range cfg.KafkaServers() {
+			if err := validateBroker(entry); err != nil {
+				add("%v", err)
+			}
+		}
 	}
 
 	if cfg.GotoSocialInstance != "" {
@@ -198,6 +205,23 @@ func validateURL(name, raw string) error {
 		}
 	}
 	return fmt.Errorf("%s must be an absolute URL with scheme and host (got %q)", name, raw)
+}
+
+// validateBroker checks that a bootstrap entry is host:port with a numeric
+// port in 1-65535. No DNS lookup is performed and hostnames are not rejected.
+func validateBroker(entry string) error {
+	host, port, err := net.SplitHostPort(entry)
+	if err != nil {
+		return fmt.Errorf("KAFKA_BOOTSTRAP_SERVERS entry %q must be host:port", entry)
+	}
+	if host == "" || port == "" {
+		return fmt.Errorf("KAFKA_BOOTSTRAP_SERVERS entry %q must include a host and a port", entry)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("KAFKA_BOOTSTRAP_SERVERS entry %q has an invalid port (must be 1-65535)", entry)
+	}
+	return nil
 }
 
 // normalizePrefix trims slashes and drops empty segments from S3_PATH_PREFIX.
