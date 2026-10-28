@@ -24,8 +24,12 @@ const (
 // metadataConn is the subset of *kafka.Conn the probe depends on.
 type metadataConn interface {
 	ReadPartitions(topics ...string) ([]kafka.Partition, error)
+	SetDeadline(time.Time) error
 	Close() error
 }
+
+// *kafka.Conn must keep satisfying the metadata connection interface.
+var _ metadataConn = (*kafka.Conn)(nil)
 
 // dialFunc opens a metadata connection to a single broker.
 type dialFunc func(ctx context.Context, addr string) (metadataConn, error)
@@ -96,7 +100,12 @@ func (p *Probe) Check(ctx context.Context) error {
 }
 
 // readPartitions dials one broker, reads the topic's partition metadata, and
-// closes the connection; the attempt timeout applies to the whole exchange.
+// closes the connection. The attempt timeout bounds the whole exchange: the
+// dial via the attempt context, and the metadata request itself via an
+// explicit connection deadline, because a kafka-go connection stops honoring
+// its dial context once the connection is established. Without that deadline
+// a broker that accepts the connection but never answers would hang the
+// probe indefinitely.
 func (p *Probe) readPartitions(ctx context.Context, broker string) ([]kafka.Partition, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, p.attemptTimeout)
 	defer cancel()
@@ -107,6 +116,10 @@ func (p *Probe) readPartitions(ctx context.Context, broker string) ([]kafka.Part
 	}
 	defer conn.Close()
 
+	deadline, _ := attemptCtx.Deadline()
+	if err := conn.SetDeadline(deadline); err != nil {
+		return nil, fmt.Errorf("set metadata deadline: %w", err)
+	}
 	return conn.ReadPartitions(p.topic)
 }
 

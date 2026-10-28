@@ -23,6 +23,8 @@ type fakeConn struct {
 
 	closed    bool
 	gotTopics []string
+
+	onSetDeadline func(time.Time)
 }
 
 func (c *fakeConn) ReadPartitions(topics ...string) ([]kafka.Partition, error) {
@@ -30,10 +32,44 @@ func (c *fakeConn) ReadPartitions(topics ...string) ([]kafka.Partition, error) {
 	return c.partitions, c.err
 }
 
+func (c *fakeConn) SetDeadline(t time.Time) error {
+	if c.onSetDeadline != nil {
+		c.onSetDeadline(t)
+	}
+	return nil
+}
+
 func (c *fakeConn) Close() error {
 	c.closed = true
 	return nil
 }
+
+// hangingConn mimics a broker that accepts the connection but never answers:
+// ReadPartitions blocks until the deadline set through SetDeadline passes.
+// If no deadline is ever set it blocks forever, like a real kafka-go
+// connection whose deadlines are zero.
+type hangingConn struct {
+	deadline time.Time
+	set      chan struct{}
+}
+
+func newHangingConn() *hangingConn {
+	return &hangingConn{set: make(chan struct{})}
+}
+
+func (c *hangingConn) SetDeadline(t time.Time) error {
+	c.deadline = t
+	close(c.set)
+	return nil
+}
+
+func (c *hangingConn) ReadPartitions(topics ...string) ([]kafka.Partition, error) {
+	<-c.set
+	<-time.After(time.Until(c.deadline))
+	return nil, errors.New("i/o timeout")
+}
+
+func (c *hangingConn) Close() error { return nil }
 
 // syncBuffer is a race-safe sink for the capturing logger.
 type syncBuffer struct {
@@ -211,6 +247,53 @@ func TestProbeCheckEmptyBrokerList(t *testing.T) {
 	}
 	if errors.Is(err, ErrTopicNotFound) {
 		t.Errorf("Check() = %v, an empty broker list must not be ErrTopicNotFound", err)
+	}
+}
+
+func TestProbeCheckSetsAttemptDeadlineOnConn(t *testing.T) {
+	p := newTestProbe(newTestLogger(), "broker-1:9092")
+	p.attemptTimeout = 5 * time.Second
+
+	var got time.Time
+	p.dial = func(context.Context, string) (metadataConn, error) {
+		conn := &fakeConn{partitions: []kafka.Partition{{}}}
+		conn.onSetDeadline = func(d time.Time) { got = d }
+		return conn, nil
+	}
+
+	start := time.Now()
+	if err := p.Check(context.Background()); err != nil {
+		t.Fatalf("Check() = %v, want nil", err)
+	}
+	if got.IsZero() {
+		t.Fatal("SetDeadline was not called on the connection; the metadata exchange is unbounded")
+	}
+	if until := got.Sub(start); until <= 0 || until > p.attemptTimeout+100*time.Millisecond {
+		t.Errorf("SetDeadline deadline %v from Check start, want within (0, attemptTimeout]", until)
+	}
+}
+
+func TestProbeCheckHangBounded(t *testing.T) {
+	p := newTestProbe(newTestLogger(), "broker-1:9092")
+	p.attemptTimeout = 50 * time.Millisecond
+
+	conn := newHangingConn()
+	p.dial = func(context.Context, string) (metadataConn, error) { return conn, nil }
+
+	start := time.Now()
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Check(context.Background()) }()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("Check() = nil, want a timeout error from the hanging broker")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Check() did not return; the metadata exchange is not bounded by the attempt timeout")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Check() took %v, want close to the attempt timeout (50ms)", elapsed)
 	}
 }
 
