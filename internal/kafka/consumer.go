@@ -64,10 +64,8 @@ func (c *Consumer) Run(ctx context.Context) error {
 		StartOffset:      kafka.FirstOffset,
 		MaxBytes:         10_000_000,
 		ReadBatchTimeout: 5 * time.Second,
-		Logger:           discardLogger{},
-		ErrorLogger: kafka.LoggerFunc(func(format string, args ...interface{}) {
-			c.log.Error(fmt.Sprintf(format, args...))
-		}),
+		Logger:           newClientLogger(c.log),
+		ErrorLogger:      newErrorLogger(c.log),
 	})
 
 	consecutiveErrors := 0
@@ -213,10 +211,4 @@ func decodeStock(data []byte) (stockIdentity, error) {
 		return stockIdentity{}, errors.New("stock missing exchange field")
 	}
 	return identity, nil
-}
-
-type discardLogger struct{}
-
-func (l discardLogger) Printf(format string, args ...interface{}) {
-	// no-op
 }
