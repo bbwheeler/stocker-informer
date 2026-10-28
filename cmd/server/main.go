@@ -74,20 +74,12 @@ func run(log *slog.Logger) error {
 	)
 
 	ready := new(atomic.Bool)
-	ready.Store(true)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if ready.Load() {
-			w.WriteHeader(http.StatusOK)
-			fmt.Fprintf(w, `{"status":"ok","version":"%s"}`+"\n", Version)
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, `{"status":"starting","version":"%s"}`+"\n", Version)
-		}
-	})
-	server := &http.Server{Addr: ":8080", Handler: mux}
+	probe := kafka.NewProbe(cfg.KafkaServers(), cfg.KafkaTopic, log)
+	log.Info("kafka connectivity probe started", "brokers", cfg.KafkaServers(), "topic", cfg.KafkaTopic)
+	go probe.Run(ctx, func() { ready.Store(true) })
+
+	server := &http.Server{Addr: ":8080", Handler: newHealthMux(ready)}
 
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -101,4 +93,21 @@ func run(log *slog.Logger) error {
 
 	log.Info("shutting down")
 	return nil
+}
+
+// newHealthMux builds the /health mux. Readiness is sticky: it starts false
+// and flips true once the Kafka probe verifies connectivity, never back.
+func newHealthMux(ready *atomic.Bool) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if ready.Load() {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"status":"ok","version":"%s"}`+"\n", Version)
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintf(w, `{"status":"starting","version":"%s"}`+"\n", Version)
+		}
+	})
+	return mux
 }
