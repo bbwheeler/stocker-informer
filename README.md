@@ -126,7 +126,7 @@ Secret values (`GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) are never i
 
 | Variable | Required / default | Secret | Meaning |
 | --- | --- | --- | --- |
-| `KAFKA_BOOTSTRAP_SERVERS` | **Required** | no | Comma-separated broker addresses, e.g. `localhost:9092` or `broker1:9092,broker2:9092`. Split on `,`, trimmed, empty entries dropped; at least one non-empty broker is required. |
+| `KAFKA_BOOTSTRAP_SERVERS` | **Required** | no | Comma-separated broker addresses, e.g. `localhost:9092` or `broker1:9092,broker2:9092`. Split on `,`, trimmed, empty entries dropped; at least one non-empty broker is required. Each entry must be `host:port` (bracketed IPv6 like `[::1]:9092` allowed), otherwise startup fails with `load config: invalid configuration: ...` and exit code `1`. |
 | `KAFKA_TOPIC` | **Required** | no | Topic carrying protobuf `stockstore.v1.Stock` signals. Operationally `stock.summary.available.v1`. |
 | `KAFKA_CONSUMER_GROUP` | **Required** | no | Consumer-group ID used for partition offset tracking. |
 | `GOTOSOCIAL_INSTANCE` | **Required** | no | Absolute `http(s)` base URL of the instance (scheme + host), e.g. `https://wheeli.social`. The publisher POSTs to `{GOTOSOCIAL_INSTANCE}/api/v1/statuses`. |
@@ -366,12 +366,13 @@ The shortest path to a running, rootless service:
 ### Logging
 
 - `log/slog` JSON handler writing to stdout.
-- Levels emitted: `Info` / `Warn` / `Error`.
+- Levels emitted: `Debug` / `Info` / `Warn` / `Error` (the default handler drops `Debug`).
 - No log-level flag.
+- kafka-go client/trace output is emitted at `Debug` as `kafka client` (dropped by the default `Info` handler); kafka-go errors are emitted at `Warn` as `kafka client error` with a `detail` attribute.
 - `GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, and the summary body are never logged.
 - No log rotation configured (stdout / journald, operator-owned).
 
-Representative log lines: `starting stocker-informer`, `configuration loaded`, `kafka consumer started`, `decode stock failed`, `summary not found`, `read summary failed`, `summary is empty, skipping publish`, `publish failed`, `summary published on GoToSocial`, `exceeded max consecutive Kafka read failures`, `abandoning commit after max retries`, `shutting down`.
+Representative log lines: `starting stocker-informer`, `configuration loaded`, `kafka consumer started`, `kafka connectivity probe started`, `kafka connectivity verified`, `kafka connectivity probe failed`, `kafka topic not available`, `kafka connectivity lost`, `kafka connectivity restored`, `kafka client error`, `decode stock failed`, `summary not found`, `read summary failed`, `summary is empty, skipping publish`, `publish failed`, `summary published on GoToSocial`, `exceeded max consecutive Kafka read failures`, `abandoning commit after max retries`, `shutting down`.
 
 ### Kafka consumer behaviour
 
@@ -380,6 +381,7 @@ Representative log lines: `starting stocker-informer`, `configuration loaded`, `
 - `MaxBytes=10_000_000`, `ReadBatchTimeout=5s`.
 - Each record value is decoded as protobuf `stockstore.v1.Stock`, the summary is read from S3, and the summary is published.
 - On a `ReadMessage` error: exponential backoff starting at `500 ms`, doubling, capped at `30 s`; if `10` or more consecutive read failures occur it logs an `Error` (`exceeded max consecutive Kafka read failures`) but keeps retrying. A successful read resets the consecutive error count and backoff.
+- Coordinator/join errors (e.g. `kafka client error` with `detail` containing `[15] Group Coordinator Not Available`) are expected during a broker restart: they are logged as `Warn` and retried automatically with no operator action. See [docs/deployment.md#troubleshooting-kafka-connectivity](docs/deployment.md#troubleshooting-kafka-connectivity).
 
 ### GoToSocial publisher behaviour
 
@@ -407,11 +409,10 @@ Offsets are committed after every message, in every outcome:
 ### Health endpoint
 
 - `GET /health` on `:8080`.
-- Returns `200` with body `{"status":"ok","version":"..."}` when ready, else `503` with `{"status":"starting","version":"..."}`.
+- Returns `503` with body `{"status":"starting","version":"..."}` until the first successful Kafka connectivity probe for `KAFKA_TOPIC`, then `200` with `{"status":"ok","version":"..."}`. Readiness is sticky thereafter: a later loss of Kafka connectivity logs `kafka connectivity lost` but does **not** flip the endpoint back to `503` (by design, to avoid restart loops — watch the logs).
 
 Caveats:
 
-- The `ready` flag is set to `true` at startup and never cleared (optimistic readiness).
 - The quadlet unit as deployed does **not** publish port `8080` to the host — the endpoint is reachable only inside the container's network namespace.
 
 ### Signals & shutdown
@@ -422,7 +423,7 @@ Caveats:
 
 ### How to verify it's working
 
-1. `podman logs stocker-informer` (or the process stdout) shows `starting stocker-informer` then `configuration loaded` then `kafka consumer started`.
+1. `podman logs stocker-informer` (or the process stdout) shows `starting stocker-informer` then `configuration loaded` then `kafka consumer started`. `/health` stays `503` (`{"status":"starting"}`) until the connectivity probe verifies metadata for `KAFKA_TOPIC`; `kafka connectivity verified` appears in the log immediately before readiness flips to `200` (`{"status":"ok"}`).
 2. Write a `NASDAQ/AAPL/summary.md` to the bucket and produce a protobuf `Stock{symbol:"AAPL",exchange:"NASDAQ"}` on `KAFKA_TOPIC`; the log shows `summary published on GoToSocial`.
 3. Confirm the status appears on the GoToSocial instance according to the configured audience.
 4. Quick negative test: run the binary with one env var deliberately left empty — it should fail fast with a `load config: invalid configuration: ...` JSON fatal-error line and exit `1`.
@@ -459,7 +460,7 @@ stocker-informer/
 ## Known limitations
 
 - The Go module path is a placeholder (`github.com/example/stocker-informer`), not the canonical repo identity.
-- The `/health` readiness flag is set to `true` at startup and never cleared (optimistic), and `:8080` is not published to the host by the quadlet unit as deployed.
+- The `/health` readiness flag is sticky: it stays `200` once the first successful Kafka probe has run and never flips back, so a cluster that dies after startup keeps `/health` at `200` — only the logs (`kafka connectivity lost`) show the loss. This is by design, to avoid restart loops. `:8080` is also not published to the host by the quadlet unit as deployed.
 - A failed GoToSocial publish is committed and dropped (not redelivered) after the publisher's 3 total attempts.
 - `GOTOSOCIAL_USER` is required by config validation but is not currently referenced by the publish request (authentication is Bearer-token based).
 - No log rotation is configured (JSON logging → stdout/journald, operator-owned).

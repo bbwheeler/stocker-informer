@@ -709,3 +709,89 @@ WantedBy=default.target
 - [ ] No `install.sh`, `publish.sh`, or `stocker-informer.build` referenced in any non-`review.md` doc.
 - [ ] `README.md` documents: single quadlet, `deploy/push.sh`, an inlined sample `~/.config/stocker-informer/.env.podman`, a Quickstart, repository structure, and consistent known-limitations.
 - [ ] `AGENTS.md` and `review.md` intentionally unmodified.
+
+---
+
+## Troubleshooting Kafka connectivity
+
+Operator guide for the Kafka-side failure signatures this service can log. The
+service self-heals from broker restarts with no operator action; use this
+section when the errors are sustained or the consumer stays silent.
+
+### Log signatures
+
+| Signature | Meaning | Transient? |
+| --- | --- | --- |
+| `kafka client error` with `detail` containing `read tcp ...: read: connection reset by peer` | The broker closed the connection mid-request (broker restart, load balancer, or broker death). | During a broker restart: yes. Sustained: no — a broker or network fault. |
+| `kafka client error` with `detail` containing `[15] Group Coordinator Not Available` | `__consumer_offsets` has no loaded coordinator yet for the consumer group. | Yes; clears once a coordinator is elected and the group rejoins. |
+| `kafka consumer started` followed by no `summary published on GoToSocial` and no errors | The consumer is waiting — topic/group mismatch or an empty topic. | **No** — a configuration problem; fix the topic/group. |
+
+**The ~5-second spacing between coordinator errors is kafka-go's
+`JoinGroupBackoff`** (`ReaderConfig.JoinGroupBackoff`), not an application
+backoff. Retries are automatic and need no operator action — wait for the
+coordinator to recover.
+
+### Broker-side checklist
+
+- Broker processes are up on every address in `KAFKA_BOOTSTRAP_SERVERS`.
+- KRaft quorum voters are reachable (no ongoing election).
+- `offsets.topic.replication.factor` is ≤ the number of live brokers.
+- A `__consumer_offsets` topic exists with all partitions online.
+- `log.dirs` points at persistent storage — not `/tmp`, which discards logs
+  and consumer-group state on every restart.
+- `KAFKA_TOPIC` exactly matches the topic the producer writes (the match is
+  case-sensitive).
+
+### Verification commands
+
+Use the standard Apache Kafka command-line tools:
+
+```bash
+# Topic exists and has all partitions online
+kafka-topics.sh --bootstrap-server <brokers> --describe --topic <KAFKA_TOPIC>
+
+# Group state is Stable with a partition assignment
+kafka-consumer-groups.sh --bootstrap-server <brokers> --describe --group <KAFKA_CONSUMER_GROUP>
+
+# Records actually exist on the topic
+kafka-console-consumer.sh --bootstrap-server <brokers> --topic <KAFKA_TOPIC> --max-messages 1
+```
+
+### Zero-fault-tolerance quorums
+
+A 2-voter KRaft quorum on a single host survives **no** broker failure: any
+restart of that host produces exactly the errors above until the quorum and
+group coordinator recover (observed: ~12 minutes in one incident). If this
+matters operationally, run a third quorum voter on a separate host and keep
+`log.dirs` persistent.
+
+### Auto-created topics hide a mistyped topic name
+
+With `auto.create.topics.enable=true`, a mistyped `KAFKA_TOPIC` is created
+empty on first metadata access. The consumer is "connected", `/health` can
+report `200`, but no records ever arrive. Always confirm the topic name and
+that a producer writes to it.
+
+### Shipped vs deployed configuration drift
+
+This drift is operator-side, **not** a repository defect. The shipped example
+`deploy/quadlet/.env.podman.example` uses
+`KAFKA_BOOTSTRAP_SERVERS=192.168.1.71:9092,192.168.1.75:9092` and
+`KAFKA_TOPIC=stock.summary.available.v1`. The deployed operator instance uses
+`192.168.1.48:9092,192.168.1.48:9094`, topic `stocker.gems.v1`, and
+`S3_ENDPOINT=http://192.168.1.31:30188`. The shipped
+defaults are **unchanged**; the operator's env file
+(`~/.config/stocker-informer/.env.podman`) is authoritative. Verify the
+active configuration from the logs: the `configuration loaded` line
+(`kafka_topic`, `s3_endpoint`) and the `kafka consumer started` line
+(`brokers`, `topic`, `group`).
+
+### Readiness semantics
+
+`/health` returns `503` `{"status":"starting","version":"..."}` until the
+connectivity probe first verifies metadata for `KAFKA_TOPIC` (logged as
+`kafka connectivity verified`), then `200` `{"status":"ok","version":"..."}`.
+Readiness is **sticky**: a later loss logs `kafka connectivity lost` (once,
+then at `Debug`) and recovery logs `kafka connectivity restored`, but the
+endpoint does not flip back to `503` — that is deliberate, to avoid restart
+loops; the logs are the signal for post-startup outages.
