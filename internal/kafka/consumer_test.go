@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/segmentio/kafka-go"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/example/stocker-informer/internal/rewriter"
 	"github.com/example/stocker-informer/internal/summarystore"
 )
 
@@ -44,12 +46,24 @@ func (f *fakePublisher) Publish(_ context.Context, text string) error {
 	return f.err
 }
 
+// fakeRewriter records every input and returns a fixed report or error.
+type fakeRewriter struct {
+	report string
+	err    error
+	inputs []string
+}
+
+func (f *fakeRewriter) Rewrite(_ context.Context, summary string) (string, error) {
+	f.inputs = append(f.inputs, summary)
+	return f.report, f.err
+}
+
 func newTestLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
 }
 
-func newTestConsumer(summaries SummaryReader, publisher *fakePublisher) *Consumer {
-	return New([]string{"localhost:9092"}, "topic", "group", summaries, publisher, newTestLogger())
+func newTestConsumer(summaries SummaryReader, rw rewriter.Rewriter, publisher *fakePublisher) *Consumer {
+	return New([]string{"localhost:9092"}, "topic", "group", summaries, rw, publisher, newTestLogger())
 }
 
 // handleAndCountCommits runs handleMessage and returns the number of commits.
@@ -142,7 +156,7 @@ func TestHandleMessagePublishesSummary(t *testing.T) {
 
 	summaries := &fakeSummaries{body: []byte(markdown)}
 	publisher := &fakePublisher{}
-	c := newTestConsumer(summaries, publisher)
+	c := newTestConsumer(summaries, nil, publisher)
 	msg := kafka.Message{Offset: 42, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
 
 	commits := handleAndCountCommits(t, c, msg)
@@ -167,7 +181,7 @@ func TestHandleMessagePublishesSummary(t *testing.T) {
 func TestHandleMessageSummaryNotFoundSkips(t *testing.T) {
 	summaries := &fakeSummaries{err: summarystore.ErrNotFound}
 	publisher := &fakePublisher{}
-	c := newTestConsumer(summaries, publisher)
+	c := newTestConsumer(summaries, nil, publisher)
 	msg := kafka.Message{Offset: 1, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
 
 	commits := handleAndCountCommits(t, c, msg)
@@ -183,7 +197,7 @@ func TestHandleMessageSummaryNotFoundSkips(t *testing.T) {
 func TestHandleMessageStorageErrorSkips(t *testing.T) {
 	summaries := &fakeSummaries{err: errors.New("boom")}
 	publisher := &fakePublisher{}
-	c := newTestConsumer(summaries, publisher)
+	c := newTestConsumer(summaries, nil, publisher)
 	msg := kafka.Message{Offset: 2, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
 
 	commits := handleAndCountCommits(t, c, msg)
@@ -199,7 +213,7 @@ func TestHandleMessageStorageErrorSkips(t *testing.T) {
 func TestHandleMessageEmptySummarySkips(t *testing.T) {
 	summaries := &fakeSummaries{body: []byte("  \n\t ")}
 	publisher := &fakePublisher{}
-	c := newTestConsumer(summaries, publisher)
+	c := newTestConsumer(summaries, nil, publisher)
 	msg := kafka.Message{Offset: 3, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
 
 	commits := handleAndCountCommits(t, c, msg)
@@ -215,7 +229,7 @@ func TestHandleMessageEmptySummarySkips(t *testing.T) {
 func TestHandleMessagePublishErrorCommits(t *testing.T) {
 	summaries := &fakeSummaries{body: []byte("# AAPL")}
 	publisher := &fakePublisher{err: errors.New("publish boom")}
-	c := newTestConsumer(summaries, publisher)
+	c := newTestConsumer(summaries, nil, publisher)
 	msg := kafka.Message{Offset: 4, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
 
 	commits := handleAndCountCommits(t, c, msg)
@@ -231,7 +245,7 @@ func TestHandleMessagePublishErrorCommits(t *testing.T) {
 func TestHandleMessageDecodeErrorCommits(t *testing.T) {
 	summaries := &fakeSummaries{body: []byte("# AAPL")}
 	publisher := &fakePublisher{}
-	c := newTestConsumer(summaries, publisher)
+	c := newTestConsumer(summaries, nil, publisher)
 	msg := kafka.Message{Offset: 5, Value: []byte{0xff, 0xff, 0xff, 0xff}}
 
 	commits := handleAndCountCommits(t, c, msg)
@@ -250,7 +264,7 @@ func TestHandleMessageDecodeErrorCommits(t *testing.T) {
 func TestHandleMessagePassesTrimmedIdentity(t *testing.T) {
 	summaries := &fakeSummaries{body: []byte("# AAPL")}
 	publisher := &fakePublisher{}
-	c := newTestConsumer(summaries, publisher)
+	c := newTestConsumer(summaries, nil, publisher)
 	msg := kafka.Message{Offset: 6, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: " AAPL ", Exchange: " NASDAQ "})}
 
 	handleAndCountCommits(t, c, msg)
@@ -260,6 +274,203 @@ func TestHandleMessagePassesTrimmedIdentity(t *testing.T) {
 	}
 	if got := summaries.requests[0]; got.exchange != "NASDAQ" || got.symbol != "AAPL" {
 		t.Errorf("store request = %+v, want trimmed exchange NASDAQ symbol AAPL", got)
+	}
+}
+
+func TestHandleMessageRewritesBeforePublish(t *testing.T) {
+	const markdown = "# AAPL\n\nRevenue up 12% year over year."
+	const report = "# Cora-9 report"
+
+	summaries := &fakeSummaries{body: []byte(markdown)}
+	rw := &fakeRewriter{report: report}
+	publisher := &fakePublisher{}
+	c := newTestConsumer(summaries, rw, publisher)
+	msg := kafka.Message{Offset: 10, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
+
+	commits := handleAndCountCommits(t, c, msg)
+
+	if len(rw.inputs) != 1 || rw.inputs[0] != markdown {
+		t.Fatalf("rewriter inputs = %q, want [%q]", rw.inputs, markdown)
+	}
+	if len(publisher.texts) != 1 {
+		t.Fatalf("publishes = %d, want 1", len(publisher.texts))
+	}
+	if publisher.texts[0] != report {
+		t.Errorf("published text = %q, want report %q", publisher.texts[0], report)
+	}
+	if commits != 1 {
+		t.Errorf("commits = %d, want 1", commits)
+	}
+}
+
+func TestHandleMessageRewriteReceivesTrimmedSummary(t *testing.T) {
+	summaries := &fakeSummaries{body: []byte("  # AAPL  \n")}
+	rw := &fakeRewriter{report: "# Cora-9 report"}
+	publisher := &fakePublisher{}
+	c := newTestConsumer(summaries, rw, publisher)
+	msg := kafka.Message{Offset: 11, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
+
+	handleAndCountCommits(t, c, msg)
+
+	if len(rw.inputs) != 1 || rw.inputs[0] != "# AAPL" {
+		t.Errorf("rewriter inputs = %q, want [%q]", rw.inputs, "# AAPL")
+	}
+}
+
+func TestHandleMessageRewriteErrorPublishesOriginal(t *testing.T) {
+	const markdown = "# AAPL\n\nRevenue up 12%."
+
+	summaries := &fakeSummaries{body: []byte(markdown)}
+	rw := &fakeRewriter{err: errors.New("ollama down")}
+	publisher := &fakePublisher{}
+	c := newTestConsumer(summaries, rw, publisher)
+	msg := kafka.Message{Offset: 12, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
+
+	commits := handleAndCountCommits(t, c, msg)
+
+	if len(publisher.texts) != 1 || publisher.texts[0] != markdown {
+		t.Fatalf("published texts = %q, want original summary %q", publisher.texts, markdown)
+	}
+	if commits != 1 {
+		t.Errorf("commits = %d, want 1", commits)
+	}
+}
+
+func TestHandleMessageRewriteEmptyPublishesOriginal(t *testing.T) {
+	const markdown = "# AAPL\n\nRevenue up 12%."
+
+	summaries := &fakeSummaries{body: []byte(markdown)}
+	rw := &fakeRewriter{report: "  \n"}
+	publisher := &fakePublisher{}
+	c := newTestConsumer(summaries, rw, publisher)
+	msg := kafka.Message{Offset: 13, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
+
+	commits := handleAndCountCommits(t, c, msg)
+
+	if len(publisher.texts) != 1 || publisher.texts[0] != markdown {
+		t.Fatalf("published texts = %q, want original summary %q", publisher.texts, markdown)
+	}
+	if commits != 1 {
+		t.Errorf("commits = %d, want 1", commits)
+	}
+}
+
+func TestHandleMessageNilRewriterPublishesOriginal(t *testing.T) {
+	const markdown = "# AAPL\n\nRevenue up 12%."
+
+	summaries := &fakeSummaries{body: []byte(markdown)}
+	publisher := &fakePublisher{}
+	c := newTestConsumer(summaries, nil, publisher)
+	msg := kafka.Message{Offset: 14, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
+
+	commits := handleAndCountCommits(t, c, msg)
+
+	if len(publisher.texts) != 1 || publisher.texts[0] != markdown {
+		t.Fatalf("published texts = %q, want original summary %q", publisher.texts, markdown)
+	}
+	if commits != 1 {
+		t.Errorf("commits = %d, want 1", commits)
+	}
+}
+
+func TestHandleMessageRewriteThenPublishErrorCommits(t *testing.T) {
+	const report = "# Cora-9 report"
+
+	summaries := &fakeSummaries{body: []byte("# AAPL")}
+	rw := &fakeRewriter{report: report}
+	publisher := &fakePublisher{err: errors.New("publish boom")}
+	c := newTestConsumer(summaries, rw, publisher)
+	msg := kafka.Message{Offset: 15, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
+
+	commits := handleAndCountCommits(t, c, msg)
+
+	if len(publisher.texts) != 1 || publisher.texts[0] != report {
+		t.Fatalf("published texts = %q, want report %q", publisher.texts, report)
+	}
+	if commits != 1 {
+		t.Errorf("commits = %d, want 1", commits)
+	}
+}
+
+func TestHandleMessageNoRewriteForEmptySummary(t *testing.T) {
+	summaries := &fakeSummaries{body: []byte("  \n\t ")}
+	rw := &fakeRewriter{report: "# Cora-9 report"}
+	publisher := &fakePublisher{}
+	c := newTestConsumer(summaries, rw, publisher)
+	msg := kafka.Message{Offset: 16, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
+
+	commits := handleAndCountCommits(t, c, msg)
+
+	if len(rw.inputs) != 0 {
+		t.Errorf("rewriter inputs = %q, want none", rw.inputs)
+	}
+	if len(publisher.texts) != 0 {
+		t.Errorf("publishes = %d, want 0", len(publisher.texts))
+	}
+	if commits != 1 {
+		t.Errorf("commits = %d, want 1", commits)
+	}
+}
+
+func TestHandleMessageNoRewriteForMissingSummary(t *testing.T) {
+	summaries := &fakeSummaries{err: summarystore.ErrNotFound}
+	rw := &fakeRewriter{report: "# Cora-9 report"}
+	publisher := &fakePublisher{}
+	c := newTestConsumer(summaries, rw, publisher)
+	msg := kafka.Message{Offset: 17, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
+
+	commits := handleAndCountCommits(t, c, msg)
+
+	if len(rw.inputs) != 0 {
+		t.Errorf("rewriter inputs = %q, want none", rw.inputs)
+	}
+	if len(publisher.texts) != 0 {
+		t.Errorf("publishes = %d, want 0", len(publisher.texts))
+	}
+	if commits != 1 {
+		t.Errorf("commits = %d, want 1", commits)
+	}
+}
+
+// TestHandleMessageLogsRewriteOutcome verifies the rewritten flag is logged
+// and that neither the summary nor the report body reaches the log.
+func TestHandleMessageLogsRewriteOutcome(t *testing.T) {
+	const markdown = "SECRET-MARKET-ANALYSIS"
+	const report = "SECRET-CORA-REPORT"
+
+	tests := []struct {
+		name      string
+		rw        rewriter.Rewriter
+		rewritten bool
+	}{
+		{name: "rewritten", rw: &fakeRewriter{report: report}, rewritten: true},
+		{name: "fallback", rw: &fakeRewriter{report: report, err: errors.New("ollama down")}, rewritten: false},
+		{name: "nil rewriter", rw: nil, rewritten: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			c := New(
+				[]string{"localhost:9092"}, "topic", "group",
+				&fakeSummaries{body: []byte(markdown)}, tt.rw, &fakePublisher{},
+				slog.New(slog.NewTextHandler(&buf, nil)),
+			)
+			msg := kafka.Message{Offset: 18, Value: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
+
+			handleAndCountCommits(t, c, msg)
+
+			logged := buf.String()
+			if !strings.Contains(logged, "summary published on GoToSocial") {
+				t.Fatalf("log missing publish line:\n%s", logged)
+			}
+			if !strings.Contains(logged, "rewritten="+strconv.FormatBool(tt.rewritten)) {
+				t.Errorf("log missing rewritten=%t:\n%s", tt.rewritten, logged)
+			}
+			if strings.Contains(logged, markdown) || strings.Contains(logged, report) {
+				t.Errorf("log leaked summary or report body:\n%s", logged)
+			}
+		})
 	}
 }
 
@@ -283,7 +494,7 @@ func (f *fakeCommitter) CommitMessages(_ context.Context, msgs ...kafka.Message)
 func newCapturingConsumer(buf *bytes.Buffer) *Consumer {
 	return New(
 		[]string{"localhost:9092"}, "topic", "group",
-		&fakeSummaries{}, &fakePublisher{},
+		&fakeSummaries{}, nil, &fakePublisher{},
 		slog.New(slog.NewTextHandler(buf, nil)),
 	)
 }

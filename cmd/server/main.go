@@ -69,6 +69,7 @@ func run(log *slog.Logger) error {
 		cfg.KafkaTopic,
 		cfg.KafkaConsumerGroup,
 		store,
+		nil, // rewriting is wired in a later task
 		publisher,
 		log,
 	)
