@@ -336,6 +336,71 @@ func TestLoadBrokers(t *testing.T) {
 	})
 }
 
+func TestLoadBrokerAddressValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		servers   string
+		wantErr   bool
+		wantParts []string
+	}{
+		{name: "localhost host", servers: "localhost:9092"},
+		{name: "ipv4 host", servers: "192.168.1.48:9094"},
+		{name: "ipv6 host", servers: "[::1]:9092"},
+		{name: "dns hostname", servers: "kafka.internal:9092"},
+		{name: "list with empties", servers: "a:1, b:2,,"},
+		{name: "missing port", servers: "localhost", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "host:port"}},
+		{name: "empty host", servers: ":9092", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "host and a port"}},
+		{name: "empty port", servers: "localhost:", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "host and a port"}},
+		{name: "non numeric port", servers: "localhost:abc", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "invalid port"}},
+		{name: "zero port", servers: "localhost:0", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "invalid port"}},
+		{name: "port too large", servers: "localhost:70000", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "invalid port"}},
+		{name: "url form", servers: "http://localhost:9092", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "host:port"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("KAFKA_BOOTSTRAP_SERVERS", tc.servers)
+
+			_, err := Load()
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("Load() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Load() with %q error = nil, want error", tc.servers)
+			}
+			for _, part := range tc.wantParts {
+				if !strings.Contains(err.Error(), part) {
+					t.Errorf("error %q does not contain %q", err, part)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadInvalidBrokerAggregates(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("KAFKA_BOOTSTRAP_SERVERS", "bogus,also-bad")
+	t.Setenv("KAFKA_TOPIC", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "invalid configuration:") {
+		t.Errorf("error %q is not aggregated", msg)
+	}
+	for _, name := range []string{"KAFKA_BOOTSTRAP_SERVERS", "KAFKA_TOPIC"} {
+		if !strings.Contains(msg, name) {
+			t.Errorf("error %q does not name %s", msg, name)
+		}
+	}
+}
+
 func TestLoadAggregatesErrors(t *testing.T) {
 	setValidEnv(t)
 	t.Setenv("KAFKA_TOPIC", "")
