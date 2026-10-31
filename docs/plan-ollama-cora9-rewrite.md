@@ -8,7 +8,7 @@
 
 **Spec:** This document. It is the design record and the step-by-step implementation plan for the change requested on 2026-10-31.
 
-**Status:** Proposed. No production code has been written yet.
+**Status:** Implemented through Task 5. Task 6 (opt-in live test and final verification gate) remains.
 
 ## Global Constraints
 
@@ -1396,9 +1396,9 @@ All must pass. `go.mod` and `go.sum` must be unchanged (no new dependencies).
 
 Repo convention has no separate status tracker; this checklist is the record. Update it as work lands.
 
-- [ ] Task 1 — `internal/config` Ollama settings and validation.
-- [ ] Task 2 — `internal/rewriter` adapter with offline tests.
-- [ ] Task 3 — Kafka dispatch integration and fallback tests.
-- [ ] Task 4 — composition-root wiring.
-- [ ] Task 5 — operator template and documentation.
+- [x] Task 1 — `internal/config` Ollama settings and validation.
+- [x] Task 2 — `internal/rewriter` adapter with offline tests.
+- [x] Task 3 — Kafka dispatch integration and fallback tests.
+- [x] Task 4 — composition-root wiring.
+- [x] Task 5 — operator template and documentation.
 - [ ] Task 6 — opt-in live test and full verification gate.
