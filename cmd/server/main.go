@@ -13,6 +13,7 @@ import (
 	"github.com/example/stocker-informer/internal/config"
 	"github.com/example/stocker-informer/internal/kafka"
 	"github.com/example/stocker-informer/internal/messenger"
+	"github.com/example/stocker-informer/internal/rewriter"
 	"github.com/example/stocker-informer/internal/summarystore"
 )
 
@@ -47,6 +48,9 @@ func run(log *slog.Logger) error {
 		"s3_endpoint", cfg.S3.Endpoint,
 		"s3_bucket", cfg.S3.Bucket,
 		"audience", cfg.GotoSocialAudience,
+		"ollama_enabled", cfg.Ollama.Enabled,
+		"ollama_base_url", cfg.Ollama.BaseURL,
+		"ollama_model", cfg.Ollama.Model,
 	)
 
 	store, err := summarystore.New(&cfg.S3)
@@ -64,12 +68,17 @@ func run(log *slog.Logger) error {
 		log,
 	)
 
+	var summaryRewriter rewriter.Rewriter
+	if cfg.Ollama.Enabled {
+		summaryRewriter = rewriter.New(cfg.Ollama)
+	}
+
 	consumer := kafka.New(
 		cfg.KafkaServers(),
 		cfg.KafkaTopic,
 		cfg.KafkaConsumerGroup,
 		store,
-		nil, // rewriting is wired in a later task
+		summaryRewriter,
 		publisher,
 		log,
 	)
