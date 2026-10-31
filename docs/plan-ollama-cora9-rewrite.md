@@ -8,7 +8,7 @@
 
 **Spec:** This document. It is the design record and the step-by-step implementation plan for the change requested on 2026-10-31.
 
-**Status:** Implemented through Task 5. Task 6 (opt-in live test and final verification gate) remains.
+**Status:** Implemented and verified. All tasks (1–6) are complete, including the opt-in live test against `gemma4:26b` on `http://192.168.1.71:11434`. The live test found that Gemma 4 is a thinking model; the adapter now sends `"think": false` (see D10).
 
 ## Global Constraints
 
@@ -103,6 +103,7 @@ Kafka record (protobuf stockstore.v1.Stock)
   "system": "<Cora-9 persona prompt>",
   "prompt": "Rewrite the stock summary between the <summary> markers as a news report. ...\n\n<summary>\n<summary markdown>\n</summary>",
   "stream": false,
+  "think": false,
   "options": {
     "temperature": 0.7,
     "num_predict": 1024
@@ -110,7 +111,7 @@ Kafka record (protobuf stockstore.v1.Stock)
 }
 ```
 
-**Response fields used:** `response` (the report), `done`, and `done_reason`. Other fields (`created_at`, timings, token counts, `context`) are ignored.
+**Response fields used:** `response` (the report), `done`, and `done_reason`. Other fields (`created_at`, timings, token counts, `context`, `thinking`) are ignored.
 
 ### D4 — Eight optional `OLLAMA_*` variables, enabled by default
 
@@ -169,6 +170,14 @@ The rewriter itself does not log. It never includes the summary or prompt in err
 **Decision:** Export `config.DefaultOllamaSystemPrompt` and use it when `OLLAMA_SYSTEM_PROMPT` is unset or blank. `rewriter.New` also substitutes it defensively when handed a blank prompt.
 
 **Why:** All environment defaults live in `internal/config`, matching the existing style. Placing the constant there avoids an import cycle (`rewriter` imports `config`; `config` must not import `rewriter`) and gives tests a single source of truth.
+
+### D10 — Disable model thinking (`think: false`)
+
+**Decision:** Every `/api/generate` request sends `"think": false`.
+
+**Why:** `gemma4:26b` advertises the `thinking` capability. With thinking enabled, Ollama streams its reasoning into a separate `thinking` field and only then writes the answer into `response`. On the first live run the model spent the entire `num_predict` budget of 1024 tokens reasoning, so `response` was empty and `done_reason` was `length`; the adapter correctly rejected the result, meaning every summary would have fallen back to the original. Reasoning text is also unsuitable for publication. Disabling thinking produced a complete 467-character report in 112 tokens with `done_reason:"stop"` on the same input.
+
+**Trade-off:** Thinking can improve quality on complex tasks, but this task is a short, fact-bounded rewrite where latency and a bounded token budget matter more. Non-thinking models ignore the field; older Ollama servers ignore unknown JSON fields.
 
 ---
 
@@ -785,6 +794,8 @@ func (o *Ollama) Rewrite(ctx context.Context, summary string) (string, error)
    }
    ```
 
+   **Live-test amendment (2026-10-31):** the request struct also carries `Think bool \`json:"think"\`` set to `false` (D10), and `TestRewriteSendsGenerateRequest` asserts the field is present and false. Gemma 4 otherwise spends the whole `num_predict` budget in the `thinking` field and returns no `response`.
+
 5. Run:
 
    ```bash
@@ -1199,7 +1210,7 @@ Do not rewrite the historical decision log; this plan extends D7's failure seman
   steady hardware demand into the next quarter.
   ```
 
-- Asserts no error, non-empty output, output differs from the input, and the prompt reaches the configured model. Log only character counts and the first 120 characters of the report, never the whole output.
+- Asserts no error, non-empty output, output differs from the input, the report still names the company (`Apple`/`AAPL`), is at least 80 runes, and does not echo the `<summary>` delimiters. A `/api/tags` preflight confirms the configured model is pulled; if it is missing, the test fails and lists the available models. Log only character counts and a 120-rune head/tail preview, never the whole output.
 - On failure, reports the endpoint and model but not the summary body.
 
 **Steps:**
@@ -1316,8 +1327,10 @@ Do not rewrite the historical decision log; this plan extends D7's failure seman
 
    ```bash
    git add internal/rewriter/ollama_live_test.go
-   git commit -m "test(rewriter): add opt-in live Ollama test"
+   git commit -m "test(rewriter): add opt-in live Ollama test and finalize plan"
    ```
+
+**Result (2026-10-31):** `TestOllamaLive` passes against `http://192.168.1.71:11434` with `gemma4:26b` (214-char input → ~450–600-char report, ~5–7s; non-deterministic wording). The first run failed with `rewriter: model output hit the num_predict limit`; investigation showed Gemma 4 spent all 1024 tokens in the `thinking` field. The adapter now sends `"think": false` (D10), and the final gate (`gofmt`, `go build ./cmd/server/`, `go vet`, `go test -count=1`, `go test -race -count=1`, `go mod verify`) passes.
 
 ---
 
@@ -1339,7 +1352,7 @@ No unit test makes a network call. `httptest.Server` and fakes only.
 OLLAMA_LIVE_TEST=1 go test ./internal/rewriter -run 'TestOllamaLive' -v
 ```
 
-Defaults to `http://192.168.1.71:11434` and `gemma4:26b`; override with `OLLAMA_BASE_URL` / `OLLAMA_MODEL`. The test makes one real generation call and logs only lengths plus a short preview. It never fails the normal suite because it skips without the gate.
+Defaults to `http://192.168.1.71:11434` and `gemma4:26b`; override with `OLLAMA_BASE_URL` / `OLLAMA_MODEL`. The test checks `/api/tags` for the configured model, makes one real generation call, and logs only lengths plus a short head/tail preview. It never fails the normal suite because it skips without the gate.
 
 ### 7.3 Verification gate
 
@@ -1401,4 +1414,4 @@ Repo convention has no separate status tracker; this checklist is the record. Up
 - [x] Task 3 — Kafka dispatch integration and fallback tests.
 - [x] Task 4 — composition-root wiring.
 - [x] Task 5 — operator template and documentation.
-- [ ] Task 6 — opt-in live test and full verification gate.
+- [x] Task 6 — opt-in live test and full verification gate; live run exposed and fixed thinking-mode token exhaustion (D10).

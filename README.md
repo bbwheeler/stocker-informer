@@ -267,9 +267,10 @@ After a non-empty summary is read and trimmed, and before it is published, the c
 
 ### Request shape
 
-- `POST {OLLAMA_BASE_URL}/api/generate` with `"stream": false`.
+- `POST {OLLAMA_BASE_URL}/api/generate` with `"stream": false` and `"think": false`.
 - A `system` field carries the Cora-9 persona; the source summary is delimited with `<summary>` / `</summary>` in the `prompt` field and is treated as data, not instructions.
 - `options.temperature` comes from `OLLAMA_TEMPERATURE`; `options.num_predict` comes from `OLLAMA_MAX_TOKENS`.
+- Thinking is disabled because `gemma4:26b` otherwise spends the whole `num_predict` budget reasoning and leaves `response` empty; reasoning text is not publishable.
 - The adapter uses only the Go standard library (`net/http`, `encoding/json`); there is no new module dependency.
 
 The built-in persona preserves facts, figures, dates, and caveats, forbids inventing prices/events/guidance/quotes, stays warm and professional, and returns only the report. Setting `OLLAMA_SYSTEM_PROMPT` replaces it.
@@ -324,7 +325,7 @@ Set `OLLAMA_ENABLED=false` and restart (no code or image change) to publish orig
 ```bash
 curl -s http://192.168.1.71:11434/api/generate \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gemma4:26b","prompt":"Say hello in one sentence.","stream":false}'
+  -d '{"model":"gemma4:26b","prompt":"Say hello in one sentence.","stream":false,"think":false}'
 ```
 
 ## Audience configuration

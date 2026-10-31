@@ -47,6 +47,7 @@ type decodedRequest struct {
 	Prompt  string `json:"prompt"`
 	System  string `json:"system"`
 	Stream  bool   `json:"stream"`
+	Think   *bool  `json:"think"`
 	Options struct {
 		Temperature float64 `json:"temperature"`
 		NumPredict  int     `json:"num_predict"`
@@ -97,6 +98,11 @@ func TestRewriteSendsGenerateRequest(t *testing.T) {
 	}
 	if gotRequest.Stream {
 		t.Error("stream = true, want false")
+	}
+	if gotRequest.Think == nil {
+		t.Error("think is absent, want false")
+	} else if *gotRequest.Think {
+		t.Error("think = true, want false")
 	}
 	if gotRequest.Options.Temperature != 0.7 {
 		t.Errorf("temperature = %v, want 0.7", gotRequest.Options.Temperature)

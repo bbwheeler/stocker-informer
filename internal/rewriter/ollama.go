@@ -54,6 +54,7 @@ type generateRequest struct {
 	Prompt  string          `json:"prompt"`
 	System  string          `json:"system"`
 	Stream  bool            `json:"stream"`
+	Think   bool            `json:"think"`
 	Options generateOptions `json:"options"`
 }
 
@@ -85,6 +86,9 @@ func (o *Ollama) Rewrite(ctx context.Context, summary string) (string, error) {
 		Prompt: buildPrompt(summary),
 		System: o.systemPrompt,
 		Stream: false,
+		// Thinking output would consume num_predict before the report is
+		// written and is not publishable, so reasoning is disabled.
+		Think: false,
 		Options: generateOptions{
 			Temperature: o.temperature,
 			NumPredict:  o.maxTokens,
