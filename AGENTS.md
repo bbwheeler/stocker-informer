@@ -53,7 +53,7 @@ Optional:
 - `OLLAMA_ENABLED` — default `true`; Go boolean; `false` publishes the original summary and makes no Ollama request
 - `OLLAMA_BASE_URL` — default `http://192.168.1.71:11434`; absolute http(s) URL; `/api/generate` is appended
 - `OLLAMA_MODEL` — default `gemma4:26b`; must be non-empty and pulled on the Ollama host
-- `OLLAMA_TIMEOUT_SECONDS` — default `120`; must be an integer `> 0`
+- `OLLAMA_TIMEOUT_SECONDS` — default `120`; must be an integer in `[1, 3600]`
 - `OLLAMA_SYSTEM_PROMPT` — default built-in Cora-9 prompt; blank uses the default
 - `OLLAMA_TEMPERATURE` — default `0.7`; finite number in `[0, 2]`
 - `OLLAMA_MAX_TOKENS` — default `1024`; sets `num_predict`; must be an integer `> 0`

@@ -152,7 +152,7 @@ Secret values (`GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) are never i
 | `OLLAMA_ENABLED` | optional, default `true` | no | Go boolean (`true`/`false`/`1`/`0`). When false, no Ollama call is made and the original summary is published. |
 | `OLLAMA_BASE_URL` | optional, default `http://192.168.1.71:11434` | no | Ollama server root. Must be an absolute `http(s)` URL with scheme and host. A trailing `/` is trimmed and `/api/generate` is appended; do not include `/api`. |
 | `OLLAMA_MODEL` | optional, default `gemma4:26b` | no | Model name passed to Ollama; must be non-empty and already pulled on the Ollama host. |
-| `OLLAMA_TIMEOUT_SECONDS` | optional, default `120` | no | Per-rewrite HTTP timeout in seconds. Must parse as an integer and be `> 0`; covers connect, request, generation, and response read. |
+| `OLLAMA_TIMEOUT_SECONDS` | optional, default `120` | no | Per-rewrite HTTP timeout in seconds. Must parse as an integer in `[1, 3600]`; covers connect, request, generation, and response read. The upper bound guards against a duration overflow disabling the timeout (see plan D11). |
 | `OLLAMA_SYSTEM_PROMPT` | optional, default built-in Cora-9 prompt | no | Replaces the persona/system instruction. Leading and trailing whitespace is trimmed; blank means the built-in prompt. |
 | `OLLAMA_TEMPERATURE` | optional, default `0.7` | no | Sampling temperature. Must be a finite number in `[0, 2]`; `0` is allowed. |
 | `OLLAMA_MAX_TOKENS` | optional, default `1024` | no | Value sent as Ollama `options.num_predict`. Must parse as an integer and be `> 0`. |
@@ -166,7 +166,7 @@ Secret values (`GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) are never i
 - `S3_TIMEOUT_SECONDS` values that are non-integers or `<= 0` are rejected.
 - `OLLAMA_ENABLED` must parse as a Go boolean; invalid values are rejected.
 - `OLLAMA_MODEL` must be non-empty.
-- `OLLAMA_TIMEOUT_SECONDS` and `OLLAMA_MAX_TOKENS` must be integers `> 0`; `OLLAMA_MAX_OUTPUT_CHARS` must be an integer `>= 0` (`0` means unlimited).
+- `OLLAMA_TIMEOUT_SECONDS` must be an integer in `[1, 3600]` and `OLLAMA_MAX_TOKENS` must be an integer `> 0`; `OLLAMA_MAX_OUTPUT_CHARS` must be an integer `>= 0` (`0` means unlimited). The timeout upper bound prevents an overflowing value from silently disabling the HTTP timeout.
 - `OLLAMA_TEMPERATURE` must be a finite number in `[0, 2]` (NaN and ±Inf are rejected).
 - `OLLAMA_*` values are validated even when `OLLAMA_ENABLED=false`, so a typo surfaces at startup instead of when rewriting is re-enabled.
 

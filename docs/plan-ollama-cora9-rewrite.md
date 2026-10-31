@@ -179,6 +179,14 @@ The rewriter itself does not log. It never includes the summary or prompt in err
 
 **Trade-off:** Thinking can improve quality on complex tasks, but this task is a short, fact-bounded rewrite where latency and a bounded token budget matter more. Non-thinking models ignore the field; older Ollama servers ignore unknown JSON fields.
 
+### D11 — Bound `OLLAMA_TIMEOUT_SECONDS` at 3600 seconds
+
+**Decision:** `OLLAMA_TIMEOUT_SECONDS` must be in `[1, 3600]`. Larger values are a startup error.
+
+**Why:** `time.Duration(seconds) * time.Second` overflows silently for values above ~9.22 billion; the wrapped result can be negative, and `net/http` treats `Client.Timeout <= 0` as *no timeout*. A plausible typo — pasting `120000000000` (120s in nanoseconds) — would have disabled the per-rewrite timeout entirely, letting a hung Ollama stall the consumer indefinitely and voiding this plan's core latency guarantee (goal 4). One hour is already far beyond any legitimate rewrite of a ≤1024-token report, so no real configuration is rejected. Added during the post-implementation review on 2026-10-31.
+
+**Trade-off:** an operator can no longer configure a per-message timeout above one hour; no sane configuration for this pipeline needs one.
+
 ---
 
 ## 3. Configuration
@@ -190,7 +198,7 @@ The rewriter itself does not log. It never includes the summary or prompt in err
 | `OLLAMA_ENABLED` | optional, default `true` | no | Go boolean (`true`/`false`/`1`/`0`, via `strconv.ParseBool`). When false, no Ollama call is made and the original summary is published. |
 | `OLLAMA_BASE_URL` | optional, default `http://192.168.1.71:11434` | no | Ollama server root. Must be an absolute `http(s)` URL with scheme and host. Trailing `/` is trimmed by the adapter; `/api/generate` is appended. Do not include `/api`. |
 | `OLLAMA_MODEL` | optional, default `gemma4:26b` | no | Model name passed to Ollama. Must be non-empty. The model must already be pulled on the Ollama host. |
-| `OLLAMA_TIMEOUT_SECONDS` | optional, default `120` | no | Per-rewrite HTTP timeout in seconds. Must parse as an integer and be `> 0`. Covers connect, request, generation, and response read. |
+| `OLLAMA_TIMEOUT_SECONDS` | optional, default `120` | no | Per-rewrite HTTP timeout in seconds. Must parse as an integer in `[1, 3600]` (upper bound added in review; see D11). Covers connect, request, generation, and response read. |
 | `OLLAMA_SYSTEM_PROMPT` | optional, default built-in Cora-9 prompt | no | Replaces the persona/system instruction. Leading and trailing whitespace is trimmed. Blank means the built-in prompt. |
 | `OLLAMA_TEMPERATURE` | optional, default `0.7` | no | Sampling temperature. Must be a finite number in `[0, 2]`. `0` is allowed (deterministic-ish). |
 | `OLLAMA_MAX_TOKENS` | optional, default `1024` | no | Value sent as Ollama `options.num_predict`. Must parse as an integer and be `> 0`. |
@@ -240,6 +248,7 @@ Each message names the variable. Aggregated as `invalid configuration: <err1>; <
 - `OLLAMA_MODEL is required and must be non-empty`
 - `OLLAMA_TIMEOUT_SECONDS must be an integer (got "...")`
 - `OLLAMA_TIMEOUT_SECONDS must be > 0 (got 0)`
+- `OLLAMA_TIMEOUT_SECONDS must be <= 3600 (got 3601)`
 - `OLLAMA_TEMPERATURE must be a number (got "...")`
 - `OLLAMA_TEMPERATURE must be a finite number (got "...")`
 - `OLLAMA_TEMPERATURE must be between 0 and 2 (got 2.5)`
@@ -398,7 +407,8 @@ func Load() (*Config, error) // unchanged signature
    | `TestLoadOllamaOverrides` | enabled `false`, base `https://ollama.internal:11434/`, model `llama3.3:70b`, timeout `45`, prompt `You are a test.`, temperature `0.2`, max tokens `256`, max chars `2000` | every field equals the override; prompt is trimmed |
    | `TestLoadOllamaInvalidEnabled` | `OLLAMA_ENABLED=maybe` | error contains `OLLAMA_ENABLED` and `boolean` |
    | `TestLoadOllamaInvalidBaseURL` | `OLLAMA_BASE_URL=ollama:11434` | error contains `OLLAMA_BASE_URL` and `absolute URL` |
-   | `TestLoadOllamaInvalidTimeout` | table `abc`, `0`, `-1` | error contains `OLLAMA_TIMEOUT_SECONDS` |
+   | `TestLoadOllamaInvalidTimeout` | table `abc`, `0`, `-1`, `3601`, `120000000000` | error contains `OLLAMA_TIMEOUT_SECONDS` (the last two enforce the D11 upper bound) |
+   | `TestLoadOllamaTimeoutUpperBoundAccepted` | `OLLAMA_TIMEOUT_SECONDS=3600` | no error, `Timeout == 1h` |
    | `TestLoadOllamaInvalidTemperature` | table `abc`, `NaN`, `+Inf`, `-0.1`, `2.1` | error contains `OLLAMA_TEMPERATURE` |
    | `TestLoadOllamaInvalidMaxTokens` | table `abc`, `0`, `-1` | error contains `OLLAMA_MAX_TOKENS` |
    | `TestLoadOllamaInvalidMaxOutputChars` | table `abc`, `-1` | error contains `OLLAMA_MAX_OUTPUT_CHARS` |
@@ -422,6 +432,7 @@ func Load() (*Config, error) // unchanged signature
          defaultOllamaBaseURL        = "http://192.168.1.71:11434"
          defaultOllamaModel          = "gemma4:26b"
          defaultOllamaTimeoutSeconds = 120
+         maxOllamaTimeoutSeconds     = 3600 // upper bound; see D11
          defaultOllamaTemperature    = 0.7
          defaultOllamaMaxTokens      = 1024
      )
@@ -450,6 +461,8 @@ func Load() (*Config, error) // unchanged signature
              add("OLLAMA_TIMEOUT_SECONDS must be an integer (got %q)", raw)
          case seconds <= 0:
              add("OLLAMA_TIMEOUT_SECONDS must be > 0 (got %d)", seconds)
+         case seconds > maxOllamaTimeoutSeconds:
+             add("OLLAMA_TIMEOUT_SECONDS must be <= %d (got %d)", maxOllamaTimeoutSeconds, seconds)
          default:
              ollamaTimeoutSeconds = seconds
          }
@@ -1415,3 +1428,4 @@ Repo convention has no separate status tracker; this checklist is the record. Up
 - [x] Task 4 — composition-root wiring.
 - [x] Task 5 — operator template and documentation.
 - [x] Task 6 — opt-in live test and full verification gate; live run exposed and fixed thinking-mode token exhaustion (D10).
+- [x] Post-review fix (2026-10-31) — `OLLAMA_TIMEOUT_SECONDS` upper bound of 3600s to prevent `time.Duration` overflow disabling the HTTP timeout (D11).

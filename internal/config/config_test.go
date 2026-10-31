@@ -490,7 +490,10 @@ func TestLoadOllamaEmptyModel(t *testing.T) {
 }
 
 func TestLoadOllamaInvalidTimeout(t *testing.T) {
-	for _, raw := range []string{"abc", "0", "-1"} {
+	// "3601" is one over the cap; "120000000000" is 120s pasted as
+	// nanoseconds, which would overflow time.Duration to a negative
+	// value and silently disable the HTTP timeout.
+	for _, raw := range []string{"abc", "0", "-1", "3601", "120000000000"} {
 		t.Run(raw, func(t *testing.T) {
 			setValidEnv(t)
 			t.Setenv("OLLAMA_TIMEOUT_SECONDS", raw)
@@ -503,6 +506,19 @@ func TestLoadOllamaInvalidTimeout(t *testing.T) {
 				t.Errorf("error %q does not name OLLAMA_TIMEOUT_SECONDS", err)
 			}
 		})
+	}
+}
+
+func TestLoadOllamaTimeoutUpperBoundAccepted(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("OLLAMA_TIMEOUT_SECONDS", "3600")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.Ollama.Timeout != 3600*time.Second {
+		t.Errorf("Ollama.Timeout = %v, want 1h0m0s", cfg.Ollama.Timeout)
 	}
 }
 

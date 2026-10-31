@@ -18,8 +18,13 @@ const (
 	defaultOllamaBaseURL        = "http://192.168.1.71:11434"
 	defaultOllamaModel          = "gemma4:26b"
 	defaultOllamaTimeoutSeconds = 120
-	defaultOllamaTemperature    = 0.7
-	defaultOllamaMaxTokens      = 1024
+	// maxOllamaTimeoutSeconds bounds the per-rewrite timeout. Beyond it the
+	// value risks overflowing time.Duration to a negative duration, which
+	// net/http treats as "no timeout", stalling the consumer on a hung
+	// Ollama; an hour is already far beyond any legitimate rewrite.
+	maxOllamaTimeoutSeconds  = 3600
+	defaultOllamaTemperature = 0.7
+	defaultOllamaMaxTokens   = 1024
 )
 
 // DefaultOllamaSystemPrompt is the built-in Cora-9 persona used when
@@ -195,6 +200,8 @@ func Load() (*Config, error) {
 			add("OLLAMA_TIMEOUT_SECONDS must be an integer (got %q)", raw)
 		case seconds <= 0:
 			add("OLLAMA_TIMEOUT_SECONDS must be > 0 (got %d)", seconds)
+		case seconds > maxOllamaTimeoutSeconds:
+			add("OLLAMA_TIMEOUT_SECONDS must be <= %d (got %d)", maxOllamaTimeoutSeconds, seconds)
 		default:
 			ollamaTimeoutSeconds = seconds
 		}
