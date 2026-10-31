@@ -1,14 +1,16 @@
 # stocker-informer
 
-`stocker-informer` is a long-running Go daemon that consumes protobuf stock summary signals from Kafka, reads each stock's Markdown `summary.md` from Garage/S3, and publishes the full summary to a GoToSocial instance.
+`stocker-informer` is a long-running Go daemon that consumes protobuf stock summary signals from Kafka, reads each stock's Markdown `summary.md` from Garage/S3, rewrites it as a Cora-9 news report with a configurable Ollama instance, and publishes the resulting Markdown to a GoToSocial instance. If the rewrite fails, the original summary is published instead.
 
-The producer (`stocker-summarizer`) writes the summary object and emits a minimal signal carrying only the stock's symbol and exchange. `stocker-informer` turns that signal into a published status with a configurable audience.
+The producer (`stocker-summarizer`) writes the summary object and emits a minimal signal carrying only the stock's symbol and exchange. `stocker-informer` turns that signal into a published status — the Cora-9 report, or the original summary on fallback — with a configurable audience.
 
 ## Key features
 
 - Kafka consumer-group subscription to protobuf `stockstore.v1.Stock` signals, with partition offset tracking so a group resumes where it left off across restarts.
 - Summary reads from Garage/S3 use the canonical bucket-relative key `[S3_PATH_PREFIX/]{EXCHANGE}/{SYMBOL}/summary.md` only; a miss is one GET and returns `ErrNotFound`.
-- Full summaries (up to ~1000 words) are published without truncation.
+- Each non-empty summary is rewritten as a Cora-9 news report via Ollama (`POST {OLLAMA_BASE_URL}/api/generate`) before publication; the persona, model, and sampling are configurable.
+- Any rewrite failure falls back to publishing the original summary, so an Ollama outage never stops or drops a publication.
+- Full summaries (up to ~1000 words) are published without truncation when rewriting is disabled or falls back.
 - Configurable GoToSocial audience: `global`, `local`, or `direct`.
 - Markdown statuses sent with `content_type=text/markdown`.
 - In-process publish retries with up to 3 total attempts and exponential backoff.
@@ -24,8 +26,8 @@ The producer (`stocker-summarizer`) writes the summary object and emits a minima
 | --- | --- |
 | Language / Runtime | Go 1.25 |
 | Module | `github.com/example/stocker-informer` |
-| Key dependencies | `github.com/segmentio/kafka-go v0.4.51`; AWS SDK for Go v2 (`config`, `credentials`, `service/s3`); `git.wheeli.ca/brian/stocker-store/proto/v1`; `google.golang.org/protobuf v1.36.12` |
-| Configuration | 9 required environment variables + 6 optional |
+| Key dependencies | `github.com/segmentio/kafka-go v0.4.51`; AWS SDK for Go v2 (`config`, `credentials`, `service/s3`); `git.wheeli.ca/brian/stocker-store/proto/v1`; `google.golang.org/protobuf v1.36.12`; the Ollama HTTP API via the standard library (no additional module) |
+| Configuration | 9 required environment variables + 14 optional |
 | Build / publish | `go build ./cmd/server/` / `./deploy/push.sh` (→ `podman build` + `podman push` to `git.wheeli.ca/brian/stocker-informer:latest`) |
 | Container base | `golang:1.25-bookworm` build → `gcr.io/distroless/static-debian12` runtime, user `nobody`/`65534` |
 | Registry image | `git.wheeli.ca/brian/stocker-informer:latest` |
@@ -60,6 +62,11 @@ export GOTOSOCIAL_USER=your-user
 export GOTOSOCIAL_TOKEN=your-token
 export GOTOSOCIAL_AUDIENCE=global
 
+# Ollama / Cora-9 rewrite (optional; these are the defaults)
+export OLLAMA_ENABLED=true
+export OLLAMA_BASE_URL=http://192.168.1.71:11434
+export OLLAMA_MODEL=gemma4:26b
+
 ./stocker-informer
 ```
 
@@ -71,6 +78,7 @@ The binary runs until stopped. Press `Ctrl-C` (`SIGINT`); it logs `shutting down
 - A reachable **Kafka** broker with a topic carrying protobuf `stockstore.v1.Stock` signals (operationally `stock.summary.available.v1`).
 - A reachable **Garage/S3** bucket that contains `summary.md` objects under the documented layout, plus static credentials with read access.
 - A reachable **GoToSocial** instance with a valid auth token.
+- A reachable **Ollama** instance (default `http://192.168.1.71:11434`) with the configured `OLLAMA_MODEL` already pulled (`ollama list`). If it is unreachable, the original summary is still published.
 - **Container / quadlet deployment:** `podman` (the quadlet engine; docker cannot run quadlets) with systemd-user quadlet support; quadlet units live in the user's `~/.config/containers/systemd/` and are registered/enabled via `~/.config/systemd/user/` (`systemctl --user`).
 - `deploy/push.sh` requires an existing `podman login` to `git.wheeli.ca` (no root/sudo).
 - The service is deployed **rootlessly** as a user systemd quadlet (`systemctl --user`) — no root/sudo at deploy time.
@@ -114,7 +122,7 @@ CGO is disabled, the runtime base is static distroless, and the container runs a
 
 ## Configuration
 
-The service is configured entirely by environment variables: nine are required and six have defaults. `config.Load()` reads every variable, applies defaults, validates all of them, and returns a single aggregated error naming each offender. A failure aborts the process with exit code `1`, for example:
+The service is configured entirely by environment variables: nine are required and fourteen have defaults. `config.Load()` reads every variable, applies defaults, validates all of them, and returns a single aggregated error naming each offender. A failure aborts the process with exit code `1`, for example:
 
 ```
 {"level":"ERROR","msg":"fatal error","error":"load config: invalid configuration: KAFKA_TOPIC is required and must be non-empty; S3_BUCKET is required and must be non-empty"}
@@ -141,13 +149,26 @@ Secret values (`GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) are never i
 | `S3_SECRET_KEY` | **Required** | **yes** | Static S3 secret key. Never logged. |
 | `S3_PATH_PREFIX` | optional, default empty | no | Key prefix placed before `{EXCHANGE}/{SYMBOL}/summary.md`. Leading/trailing slashes are trimmed and empty segments dropped. |
 | `S3_TIMEOUT_SECONDS` | optional, default `10` | no | Per-summary-read timeout in seconds (covers the summary read). Must parse as an integer and be `> 0`. |
+| `OLLAMA_ENABLED` | optional, default `true` | no | Go boolean (`true`/`false`/`1`/`0`). When false, no Ollama call is made and the original summary is published. |
+| `OLLAMA_BASE_URL` | optional, default `http://192.168.1.71:11434` | no | Ollama server root. Must be an absolute `http(s)` URL with scheme and host. A trailing `/` is trimmed and `/api/generate` is appended; do not include `/api`. |
+| `OLLAMA_MODEL` | optional, default `gemma4:26b` | no | Model name passed to Ollama; must be non-empty and already pulled on the Ollama host. |
+| `OLLAMA_TIMEOUT_SECONDS` | optional, default `120` | no | Per-rewrite HTTP timeout in seconds. Must parse as an integer in `[1, 3600]`; covers connect, request, generation, and response read. The upper bound guards against a duration overflow disabling the timeout (see plan D11). |
+| `OLLAMA_SYSTEM_PROMPT` | optional, default built-in Cora-9 prompt | no | Replaces the persona/system instruction. Leading and trailing whitespace is trimmed; blank means the built-in prompt. |
+| `OLLAMA_TEMPERATURE` | optional, default `0.7` | no | Sampling temperature. Must be a finite number in `[0, 2]`; `0` is allowed. |
+| `OLLAMA_MAX_TOKENS` | optional, default `1024` | no | Value sent as Ollama `options.num_predict`. Must parse as an integer and be `> 0`. |
+| `OLLAMA_MAX_OUTPUT_CHARS` | optional, default `0` (unlimited) | no | Maximum acceptable report length in Unicode runes after trimming. Must parse as an integer and be `>= 0`. Output over the cap falls back to the original. |
 
 ### Validation notes
 
 - All nine required variables are checked together; every empty one is named in the aggregated error rather than only the first.
-- `GOTOSOCIAL_INSTANCE` and `S3_ENDPOINT` must both parse as absolute URLs with an `http`/`https` scheme and a host.
+- `GOTOSOCIAL_INSTANCE`, `S3_ENDPOINT`, and `OLLAMA_BASE_URL` must parse as absolute URLs with an `http`/`https` scheme and a host.
 - `GOTOSOCIAL_AUDIENCE` is trimmed and lower-cased; anything outside `global|local|direct` is rejected.
 - `S3_TIMEOUT_SECONDS` values that are non-integers or `<= 0` are rejected.
+- `OLLAMA_ENABLED` must parse as a Go boolean; invalid values are rejected.
+- `OLLAMA_MODEL` must be non-empty.
+- `OLLAMA_TIMEOUT_SECONDS` must be an integer in `[1, 3600]` and `OLLAMA_MAX_TOKENS` must be an integer `> 0`; `OLLAMA_MAX_OUTPUT_CHARS` must be an integer `>= 0` (`0` means unlimited). The timeout upper bound prevents an overflowing value from silently disabling the HTTP timeout.
+- `OLLAMA_TEMPERATURE` must be a finite number in `[0, 2]` (NaN and ±Inf are rejected).
+- `OLLAMA_*` values are validated even when `OLLAMA_ENABLED=false`, so a typo surfaces at startup instead of when rewriting is re-enabled.
 
 ### Example env file
 
@@ -216,8 +237,9 @@ message ScoreEntry {
 
 ### Publication
 
-- The summary body is trimmed of surrounding whitespace and published verbatim as `text/markdown`.
-- No title, header, or other decoration is added, and the body is not truncated.
+- The summary body is trimmed of surrounding whitespace. When `OLLAMA_ENABLED=true` it is rewritten as a Cora-9 news report before publication; see **Cora-9 rewrite (Ollama)**.
+- The published text is the Cora-9 report when rewriting succeeds; otherwise it is the trimmed original summary.
+- The published body is sent as `text/markdown` without truncation. `stocker-informer` adds no title, header, or other decoration (the model may format the report itself).
 - If the instance's status limit is exceeded, GoToSocial returns a non-2xx, the publish is retried, and then the message is dropped (see **Known limitations**).
 
 ### Sample
@@ -237,7 +259,74 @@ into the next quarter.
 **Takeaway:** hardware demand is stable; margin expansion depends on services mix.
 ```
 
-With `GOTOSOCIAL_AUDIENCE=global`, the resulting public status is exactly that Markdown (no added title line, no truncation). With `local`, the same body is posted as a public status restricted to the local timeline. With `direct`, the body is prefixed with `@<recipient> ` and posted as a direct status.
+With `GOTOSOCIAL_AUDIENCE=global` and rewriting disabled (or on fallback), the resulting public status is exactly that Markdown (no added title line, no truncation). With rewriting enabled (the default), the status is the Cora-9 report generated from it. With `local`, the published body is posted as a public status restricted to the local timeline. With `direct`, the body is prefixed with `@<recipient> ` and posted as a direct status.
+
+## Cora-9 rewrite (Ollama)
+
+After a non-empty summary is read and trimmed, and before it is published, the consumer asks a configurable Ollama instance to rewrite it as a news report in the voice of **Cora-9** — a cheerful, friendly, intelligent, and demure robot woman who is a financial expert and news reporter. Missing, empty, and unreadable summaries never reach Ollama; rewriting is skipped and the existing skip/commit behavior applies.
+
+### Request shape
+
+- `POST {OLLAMA_BASE_URL}/api/generate` with `"stream": false` and `"think": false`.
+- A `system` field carries the Cora-9 persona; the source summary is delimited with `<summary>` / `</summary>` in the `prompt` field and is treated as data, not instructions.
+- `options.temperature` comes from `OLLAMA_TEMPERATURE`; `options.num_predict` comes from `OLLAMA_MAX_TOKENS`.
+- Thinking is disabled because `gemma4:26b` otherwise spends the whole `num_predict` budget reasoning and leaves `response` empty; reasoning text is not publishable.
+- The adapter uses only the Go standard library (`net/http`, `encoding/json`); there is no new module dependency.
+
+The built-in persona preserves facts, figures, dates, and caveats, forbids inventing prices/events/guidance/quotes, stays warm and professional, and returns only the report. Setting `OLLAMA_SYSTEM_PROMPT` replaces it.
+
+### Defaults
+
+| Setting | Default |
+| --- | --- |
+| `OLLAMA_ENABLED` | `true` |
+| `OLLAMA_BASE_URL` | `http://192.168.1.71:11434` |
+| `OLLAMA_MODEL` | `gemma4:26b` |
+| `OLLAMA_TIMEOUT_SECONDS` | `120` |
+| `OLLAMA_TEMPERATURE` | `0.7` |
+| `OLLAMA_MAX_TOKENS` | `1024` |
+| `OLLAMA_MAX_OUTPUT_CHARS` | `0` (unlimited) |
+| `OLLAMA_SYSTEM_PROMPT` | built-in Cora-9 prompt |
+
+### Failure semantics
+
+Any rewrite failure logs a warning and publishes the original summary. The offset is committed exactly once, as before; rewriting never skips a publication and never changes offset semantics.
+
+| Condition | Published text | Log |
+| --- | --- | --- |
+| `OLLAMA_ENABLED=false` | original summary | `Info` published, `rewritten=false` |
+| Success, non-empty, within cap | Cora-9 report | `Info` published, `rewritten=true` |
+| Connection refused / DNS / TLS error | original summary | `Warn` rewrite failed + `Info` published, `rewritten=false` |
+| Timeout (`OLLAMA_TIMEOUT_SECONDS`) | original summary | `Warn` rewrite failed + `Info` published, `rewritten=false` |
+| Non-2xx (for example model not pulled → 404) | original summary | `Warn` rewrite failed + `Info` published, `rewritten=false` |
+| Malformed JSON / truncated body | original summary | `Warn` rewrite failed + `Info` published, `rewritten=false` |
+| `done:false` | original summary | `Warn` rewrite failed + `Info` published, `rewritten=false` |
+| `done_reason:"length"` | original summary | `Warn` rewrite failed + `Info` published, `rewritten=false` |
+| Blank `response` | original summary | `Warn` rewrite returned empty output + `Info` published, `rewritten=false` |
+| Report longer than `OLLAMA_MAX_OUTPUT_CHARS` | original summary | `Warn` rewrite failed + `Info` published, `rewritten=false` |
+| Rewrite succeeds, GoToSocial publish fails | — | `Error` publish failed (existing 3-attempt behavior) |
+
+### Length strategy
+
+- `OLLAMA_MAX_TOKENS` bounds generation via `num_predict`.
+- If Ollama stops with `done_reason:"length"`, the output hit the token cap and is treated as a failure; the original summary is published.
+- `OLLAMA_MAX_OUTPUT_CHARS` is an optional hard cap counted in Unicode runes after trimming. `0` means unlimited. Over the cap is a failure; output is never truncated mid-document.
+
+### Privacy
+
+The summary is sent over plain HTTP to `OLLAMA_BASE_URL`, so the host must be on a trusted network. No credentials are sent. The summary, the prompt, and the rewritten report are never logged; only lengths, identity fields, offsets, and error text are logged.
+
+### Operational rollback
+
+Set `OLLAMA_ENABLED=false` and restart (no code or image change) to publish original summaries unchanged. Validation of the other `OLLAMA_*` values still runs.
+
+### Smoke test
+
+```bash
+curl -s http://192.168.1.71:11434/api/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gemma4:26b","prompt":"Say hello in one sentence.","stream":false,"think":false}'
+```
 
 ## Audience configuration
 
@@ -245,9 +334,9 @@ With `GOTOSOCIAL_AUDIENCE=global`, the resulting public status is exactly that M
 
 | Audience | `visibility` | `local_only` | `status` |
 | --- | --- | --- | --- |
-| `global` (default) | `public` | `false` | `<summary>` |
-| `local` | `public` | `true` | `<summary>` |
-| `direct` | `direct` | `false` | `@<recipient> <summary>` |
+| `global` (default) | `public` | `false` | `<report or summary>` |
+| `local` | `public` | `true` | `<report or summary>` |
+| `direct` | `direct` | `false` | `@<recipient> <report or summary>` |
 
 ### Direct recipient normalization
 
@@ -277,7 +366,7 @@ Export the environment variables, then run the built binary. It emits structured
 {"level":"INFO","msg":"starting stocker-informer","version":"dev","commit":"none","build_time":"unknown"}
 ```
 
-It then logs `configuration loaded` (with `kafka_topic`, `s3_endpoint`, `s3_bucket`, `audience`) and `kafka consumer started`. It runs until `SIGINT` / `SIGTERM`, then logs `shutting down` and exits with code `0`.
+It then logs `configuration loaded` (with `kafka_topic`, `s3_endpoint`, `s3_bucket`, `audience`, `ollama_enabled`, `ollama_base_url`, and `ollama_model`) and `kafka consumer started`. It runs until `SIGINT` / `SIGTERM`, then logs `shutting down` and exits with code `0`.
 
 ### Container
 
@@ -350,7 +439,7 @@ It requires an existing `podman login` to `git.wheeli.ca` beforehand. The pushed
 The shortest path to a running, rootless service:
 
 1. **Write the env file** (the file is not shipped — you author it):
-   `mkdir -p ~/.config/stocker-informer` and create `~/.config/stocker-informer/.env.podman` from `deploy/quadlet/.env.podman.example` (see **Environment Variables**); fill in the Kafka, S3, and GoToSocial values.
+   `mkdir -p ~/.config/stocker-informer` and create `~/.config/stocker-informer/.env.podman` from `deploy/quadlet/.env.podman.example` (see **Environment Variables**); fill in the Kafka, S3, and GoToSocial values. The `OLLAMA_*` defaults work as shipped; adjust them only if the Ollama host or model differs.
 
 2. **Build + push the image** to the registry (no root):
    `./deploy/push.sh`
@@ -368,10 +457,12 @@ The shortest path to a running, rootless service:
 - `log/slog` JSON handler writing to stdout.
 - Levels emitted: `Debug` / `Info` / `Warn` / `Error` (the default handler drops `Debug`).
 - No log-level flag.
+- `GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, the summary body, the rewritten report, and the Ollama system prompt are never logged.
 - kafka-go client/trace output is emitted at `Debug` as `kafka client` (dropped by the default `Info` handler); kafka-go errors are emitted at `Warn` as `kafka client error` with a `detail` attribute.
 - `GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, and the summary body are never logged.
 - No log rotation configured (stdout / journald, operator-owned).
 
+Representative log lines: `starting stocker-informer`, `configuration loaded`, `kafka consumer started`, `decode stock failed`, `summary not found`, `read summary failed`, `summary is empty, skipping publish`, `rewrite failed, publishing original summary`, `rewrite returned empty output, publishing original summary`, `publish failed`, `summary published on GoToSocial`, `exceeded max consecutive Kafka read failures`, `abandoning commit after max retries`, `shutting down`. The success line carries `rewritten=true|false`, plus `summary_chars` and `report_chars` when rewritten.
 Representative log lines: `starting stocker-informer`, `configuration loaded`, `kafka consumer started`, `kafka connectivity probe started`, `kafka connectivity verified`, `kafka connectivity probe failed`, `kafka topic not available`, `kafka connectivity lost`, `kafka connectivity restored`, `kafka client error`, `decode stock failed`, `summary not found`, `read summary failed`, `summary is empty, skipping publish`, `publish failed`, `summary published on GoToSocial`, `exceeded max consecutive Kafka read failures`, `abandoning commit after max retries`, `shutting down`.
 
 ### Kafka consumer behaviour
@@ -379,7 +470,7 @@ Representative log lines: `starting stocker-informer`, `configuration loaded`, `
 - Consumer `GroupID=<KAFKA_CONSUMER_GROUP>`, topic `<KAFKA_TOPIC>`.
 - `StartOffset=kafka.FirstOffset` — a fresh group starts at the beginning of the log.
 - `MaxBytes=10_000_000`, `ReadBatchTimeout=5s`.
-- Each record value is decoded as protobuf `stockstore.v1.Stock`, the summary is read from S3, and the summary is published.
+- Each record value is decoded as protobuf `stockstore.v1.Stock`, the summary is read from S3, rewritten as a Cora-9 report when enabled (falling back to the original on any rewrite error), and the resulting text is published.
 - On a `ReadMessage` error: exponential backoff starting at `500 ms`, doubling, capped at `30 s`; if `10` or more consecutive read failures occur it logs an `Error` (`exceeded max consecutive Kafka read failures`) but keeps retrying. A successful read resets the consecutive error count and backoff.
 - Coordinator/join errors (e.g. `kafka client error` with `detail` containing `[15] Group Coordinator Not Available`) are expected during a broker restart: they are logged as `Warn` and retried automatically with no operator action. See [docs/deployment.md#troubleshooting-kafka-connectivity](docs/deployment.md#troubleshooting-kafka-connectivity).
 
@@ -400,9 +491,11 @@ Offsets are committed after every message, in every outcome:
 | Summary not found | `Warn` (`summary not found`) | committed |
 | S3 storage error (non-not-found) | `Error` (`read summary failed`) | committed |
 | Summary trims to empty | `Warn` (`summary is empty, skipping publish`) | committed |
+| Rewrite failure (or blank output) | `Warn` (`rewrite failed, publishing original summary`) | committed; original summary published |
 | Publish failure after 3 attempts | `Error` (`publish failed`) | committed |
-| Publish success | `Info` (`summary published on GoToSocial`, with `symbol`, `exchange`, `offset`) | committed |
+| Publish success | `Info` (`summary published on GoToSocial`, with `symbol`, `exchange`, `offset`, `rewritten`) | committed |
 
+- A rewrite failure never skips the publish: the original summary is published and the message is committed exactly once.
 - A **failed** GoToSocial publish is committed and dropped; only the publisher's 3 total attempts apply, and a failed publish is **not** redelivered by the consumer.
 - Offset commit (`commitWithRetries`) attempts up to `3` times (`100 ms` between tries); if all fail it logs `abandoning commit after max retries` and continues.
 
@@ -423,6 +516,13 @@ Caveats:
 
 ### How to verify it's working
 
+1. `podman logs stocker-informer` (or the process stdout) shows `starting stocker-informer` then `configuration loaded` then `kafka consumer started`.
+2. Write a `NASDAQ/AAPL/summary.md` to the bucket and produce a protobuf `Stock{symbol:"AAPL",exchange:"NASDAQ"}` on `KAFKA_TOPIC`; the log shows `summary published on GoToSocial` with `rewritten=true`, and the status reads as a Cora-9 news report.
+3. Rewrite fallback check: stop Ollama (or point `OLLAMA_BASE_URL` at an unused port); the same signal logs `rewrite failed, publishing original summary`, the original summary appears, and the success line shows `rewritten=false`. Set `OLLAMA_ENABLED=false` to confirm the same publish without a warning.
+4. Confirm the status appears on the GoToSocial instance according to the configured audience.
+5. Quick negative test: run the binary with one env var deliberately left empty — it should fail fast with a `load config: invalid configuration: ...` JSON fatal-error line and exit `1`.
+6. S3 path check: with a missing summary, the log shows `summary not found` and the consumer continues (offset committed).
+7. Restart check: stop/start and confirm the consumer resumes at the last committed offset for the same `KAFKA_CONSUMER_GROUP`.
 1. `podman logs stocker-informer` (or the process stdout) shows `starting stocker-informer` then `configuration loaded` then `kafka consumer started`. `/health` stays `503` (`{"status":"starting"}`) until the connectivity probe verifies metadata for `KAFKA_TOPIC`; `kafka connectivity verified` appears in the log immediately before readiness flips to `200` (`{"status":"ok"}`).
 2. Write a `NASDAQ/AAPL/summary.md` to the bucket and produce a protobuf `Stock{symbol:"AAPL",exchange:"NASDAQ"}` on `KAFKA_TOPIC`; the log shows `summary published on GoToSocial`.
 3. Confirm the status appears on the GoToSocial instance according to the configured audience.
@@ -443,12 +543,15 @@ stocker-informer/
 ├── README.md
 ├── docs/
 │   ├── deployment.md
+│   ├── plan-ollama-cora9-rewrite.md
 │   └── stock-summary-gotosocial.md
 ├── cmd/server/main.go
 ├── internal/config/config.go
 ├── internal/kafka/consumer.go
 ├── internal/messenger/messenger.go
 ├── internal/messenger/gotosocial_publisher.go
+├── internal/rewriter/ollama.go
+├── internal/rewriter/rewriter.go
 ├── internal/summarystore/store.go
 └── deploy/
     ├── push.sh
@@ -457,6 +560,23 @@ stocker-informer/
         └── stocker-informer.container
 ```
 
+## Testing
+
+```bash
+gofmt -l .              # expected: no output
+go build ./cmd/server/
+go vet ./...
+go test ./... -count=1
+```
+
+- Unit tests are offline: S3 uses an injected fake API, and GoToSocial and Ollama use `httptest`.
+- The opt-in GoToSocial live test runs only when `GOTOSOCIAL_LIVE_TEST=1` and requires `GOTOSOCIAL_INSTANCE`, `GOTOSOCIAL_USER`, `GOTOSOCIAL_TOKEN`, and `GOTOSOCIAL_RECIPIENT`.
+- The opt-in Ollama live test is gated by `OLLAMA_LIVE_TEST=1`, defaults to `http://192.168.1.71:11434` and `gemma4:26b`, and honours `OLLAMA_BASE_URL` / `OLLAMA_MODEL` when set (see `docs/plan-ollama-cora9-rewrite.md` §7.2):
+
+  ```bash
+  OLLAMA_LIVE_TEST=1 go test ./internal/rewriter -run TestOllamaLive -v
+  ```
+
 ## Known limitations
 
 - The Go module path is a placeholder (`github.com/example/stocker-informer`), not the canonical repo identity.
@@ -464,7 +584,12 @@ stocker-informer/
 - A failed GoToSocial publish is committed and dropped (not redelivered) after the publisher's 3 total attempts.
 - `GOTOSOCIAL_USER` is required by config validation but is not currently referenced by the publish request (authentication is Bearer-token based).
 - No log rotation is configured (JSON logging → stdout/journald, operator-owned).
-- No chunking or threading: a summary larger than the instance's status limit fails validation at GoToSocial, is retried 3 times, and is then dropped.
+- Rewriting adds up to `OLLAMA_TIMEOUT_SECONDS` latency per message; the consumer processes messages serially.
+- Rewrite failures are not retried; the summary is published unrewritten.
+- Model output is non-deterministic and may still omit or misstate details despite the prompt; the original summary is the source of truth.
+- The summary is sent to Ollama over plain HTTP; the Ollama host must be trusted.
+- No chunking or threading: a summary or report larger than the instance's status limit fails validation at GoToSocial, is retried 3 times, and is then dropped.
+- Prompt-injection mitigations (persona rules plus `<summary>` delimiters) are best-effort, not a guarantee.
 - S3 storage errors are not retried; the message is logged, the offset is committed, and the summary is skipped.
 - Summary reads issue a single GET at the canonical key, so a missing summary costs one S3 round trip.
 - The container build needs network and git access to `git.wheeli.ca` to resolve the private `stocker-store` module; no credentials are baked into the image.

@@ -7,12 +7,14 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	stockstorev1 "git.wheeli.ca/brian/stocker-store/proto/v1"
 	"github.com/segmentio/kafka-go"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/example/stocker-informer/internal/messenger"
+	"github.com/example/stocker-informer/internal/rewriter"
 	"github.com/example/stocker-informer/internal/summarystore"
 )
 
@@ -35,17 +37,20 @@ type Consumer struct {
 	topic         string
 	consumerGroup string
 	summaries     SummaryReader
+	rewriter      rewriter.Rewriter
 	publisher     messenger.Publisher
 	log           *slog.Logger
 }
 
-// New creates a new Kafka consumer for the given topic and broker list.
-func New(brokers []string, topic, consumerGroup string, summaries SummaryReader, publisher messenger.Publisher, log *slog.Logger) *Consumer {
+// New creates a new Kafka consumer for the given topic and broker list. A nil
+// rewriter means summaries are published unchanged.
+func New(brokers []string, topic, consumerGroup string, summaries SummaryReader, summaryRewriter rewriter.Rewriter, publisher messenger.Publisher, log *slog.Logger) *Consumer {
 	return &Consumer{
 		brokers:       brokers,
 		topic:         topic,
 		consumerGroup: consumerGroup,
 		summaries:     summaries,
+		rewriter:      summaryRewriter,
 		publisher:     publisher,
 		log:           log,
 	}
@@ -121,9 +126,11 @@ func (c *Consumer) Run(ctx context.Context) error {
 	}
 }
 
-// handleMessage decodes a stock signal, reads its summary, and publishes it.
-// Every outcome commits the offset: the pipeline is at-most-once after the
-// publisher's own retries. The summary body is never logged.
+// handleMessage decodes a stock signal, reads its summary, optionally rewrites
+// it, and publishes it. A rewrite failure or blank report logs a warning and
+// publishes the original summary. Every outcome commits the offset: the
+// pipeline is at-most-once after the publisher's own retries. The summary and
+// report bodies are never logged.
 func (c *Consumer) handleMessage(ctx context.Context, msg kafka.Message, commit func(kafka.Message)) {
 	identity, err := decodeStock(msg.Value)
 	if err != nil {
@@ -150,14 +157,51 @@ func (c *Consumer) handleMessage(ctx context.Context, msg kafka.Message, commit 
 		return
 	}
 
-	if err := c.publisher.Publish(ctx, text); err != nil {
+	publishText := text
+	rewritten := false
+	if c.rewriter != nil {
+		report, err := c.rewriter.Rewrite(ctx, text)
+		switch {
+		case err != nil:
+			c.log.Warn("rewrite failed, publishing original summary",
+				"error", err,
+				"symbol", identity.Symbol,
+				"exchange", identity.Exchange,
+				"offset", msg.Offset,
+				"summary_chars", utf8.RuneCountInString(text),
+			)
+		case strings.TrimSpace(report) == "":
+			c.log.Warn("rewrite returned empty output, publishing original summary",
+				"symbol", identity.Symbol,
+				"exchange", identity.Exchange,
+				"offset", msg.Offset,
+			)
+		default:
+			publishText = strings.TrimSpace(report)
+			rewritten = true
+		}
+	}
+
+	if err := c.publisher.Publish(ctx, publishText); err != nil {
 		c.log.Error("publish failed", "error", err, "symbol", identity.Symbol, "exchange", identity.Exchange, "offset", msg.Offset)
 		commit(msg)
 		return
 	}
 
+	fields := []any{
+		"symbol", identity.Symbol,
+		"exchange", identity.Exchange,
+		"offset", msg.Offset,
+		"rewritten", rewritten,
+	}
+	if rewritten {
+		fields = append(fields,
+			"summary_chars", utf8.RuneCountInString(text),
+			"report_chars", utf8.RuneCountInString(publishText),
+		)
+	}
 	commit(msg)
-	c.log.Info("summary published on GoToSocial", "symbol", identity.Symbol, "exchange", identity.Exchange, "offset", msg.Offset)
+	c.log.Info("summary published on GoToSocial", fields...)
 }
 
 // offsetCommitter commits consumed offsets. *kafka.Reader satisfies it; the

@@ -35,6 +35,15 @@ func setValidEnv(t *testing.T) {
 	t.Setenv("S3_SECRET_KEY", testSecret)
 	t.Setenv("S3_PATH_PREFIX", "")
 	t.Setenv("S3_TIMEOUT_SECONDS", "")
+
+	t.Setenv("OLLAMA_ENABLED", "")
+	t.Setenv("OLLAMA_BASE_URL", "")
+	t.Setenv("OLLAMA_MODEL", "")
+	t.Setenv("OLLAMA_TIMEOUT_SECONDS", "")
+	t.Setenv("OLLAMA_SYSTEM_PROMPT", "")
+	t.Setenv("OLLAMA_TEMPERATURE", "")
+	t.Setenv("OLLAMA_MAX_TOKENS", "")
+	t.Setenv("OLLAMA_MAX_OUTPUT_CHARS", "")
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -432,6 +441,246 @@ func TestLoadErrorsDoNotLeakSecrets(t *testing.T) {
 	for _, secret := range []string{testToken, testAccess, testSecret} {
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("error %q leaks a secret value", err)
+		}
+	}
+}
+
+func TestLoadOllamaDefaults(t *testing.T) {
+	setValidEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+
+	got := cfg.Ollama
+	if !got.Enabled {
+		t.Error("Ollama.Enabled = false, want true")
+	}
+	if got.BaseURL != "http://192.168.1.71:11434" {
+		t.Errorf("Ollama.BaseURL = %q, want default", got.BaseURL)
+	}
+	if got.Model != "gemma4:26b" {
+		t.Errorf("Ollama.Model = %q, want %q", got.Model, "gemma4:26b")
+	}
+	if got.SystemPrompt != DefaultOllamaSystemPrompt {
+		t.Errorf("Ollama.SystemPrompt = %q, want DefaultOllamaSystemPrompt", got.SystemPrompt)
+	}
+	if got.Timeout != 120*time.Second {
+		t.Errorf("Ollama.Timeout = %v, want 120s", got.Timeout)
+	}
+	if got.Temperature != 0.7 {
+		t.Errorf("Ollama.Temperature = %v, want 0.7", got.Temperature)
+	}
+	if got.MaxTokens != 1024 {
+		t.Errorf("Ollama.MaxTokens = %d, want 1024", got.MaxTokens)
+	}
+	if got.MaxOutputChars != 0 {
+		t.Errorf("Ollama.MaxOutputChars = %d, want 0 (unlimited)", got.MaxOutputChars)
+	}
+}
+
+func TestLoadOllamaOverrides(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("OLLAMA_ENABLED", "false")
+	t.Setenv("OLLAMA_BASE_URL", "https://ollama.internal:11434/")
+	t.Setenv("OLLAMA_MODEL", "llama3.3:70b")
+	t.Setenv("OLLAMA_TIMEOUT_SECONDS", "45")
+	t.Setenv("OLLAMA_SYSTEM_PROMPT", "  You are a test.  ")
+	t.Setenv("OLLAMA_TEMPERATURE", "0.2")
+	t.Setenv("OLLAMA_MAX_TOKENS", "256")
+	t.Setenv("OLLAMA_MAX_OUTPUT_CHARS", "2000")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+
+	want := OllamaConfig{
+		Enabled:        false,
+		BaseURL:        "https://ollama.internal:11434/",
+		Model:          "llama3.3:70b",
+		SystemPrompt:   "You are a test.",
+		Timeout:        45 * time.Second,
+		Temperature:    0.2,
+		MaxTokens:      256,
+		MaxOutputChars: 2000,
+	}
+	if cfg.Ollama != want {
+		t.Errorf("Ollama = %+v, want %+v", cfg.Ollama, want)
+	}
+}
+
+func TestLoadOllamaInvalidEnabled(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("OLLAMA_ENABLED", "maybe")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+	for _, want := range []string{"OLLAMA_ENABLED", "boolean"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+}
+
+func TestLoadOllamaInvalidBaseURL(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("OLLAMA_BASE_URL", "ollama:11434")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+	for _, want := range []string{"OLLAMA_BASE_URL", "absolute URL"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+}
+
+func TestLoadOllamaEmptyModel(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("OLLAMA_MODEL", "   ")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "OLLAMA_MODEL") {
+		t.Errorf("error %q does not name OLLAMA_MODEL", err)
+	}
+}
+
+func TestLoadOllamaInvalidTimeout(t *testing.T) {
+	// "3601" is one over the cap; "120000000000" is 120s pasted as
+	// nanoseconds, which would overflow time.Duration to a negative
+	// value and silently disable the HTTP timeout.
+	for _, raw := range []string{"abc", "0", "-1", "3601", "120000000000"} {
+		t.Run(raw, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("OLLAMA_TIMEOUT_SECONDS", raw)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() with OLLAMA_TIMEOUT_SECONDS=%q error = nil, want error", raw)
+			}
+			if !strings.Contains(err.Error(), "OLLAMA_TIMEOUT_SECONDS") {
+				t.Errorf("error %q does not name OLLAMA_TIMEOUT_SECONDS", err)
+			}
+		})
+	}
+}
+
+func TestLoadOllamaTimeoutUpperBoundAccepted(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("OLLAMA_TIMEOUT_SECONDS", "3600")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.Ollama.Timeout != 3600*time.Second {
+		t.Errorf("Ollama.Timeout = %v, want 1h0m0s", cfg.Ollama.Timeout)
+	}
+}
+
+func TestLoadOllamaInvalidTemperature(t *testing.T) {
+	for _, raw := range []string{"abc", "NaN", "+Inf", "-0.1", "2.1"} {
+		t.Run(raw, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("OLLAMA_TEMPERATURE", raw)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() with OLLAMA_TEMPERATURE=%q error = nil, want error", raw)
+			}
+			if !strings.Contains(err.Error(), "OLLAMA_TEMPERATURE") {
+				t.Errorf("error %q does not name OLLAMA_TEMPERATURE", err)
+			}
+		})
+	}
+}
+
+func TestLoadOllamaInvalidMaxTokens(t *testing.T) {
+	for _, raw := range []string{"abc", "0", "-1"} {
+		t.Run(raw, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("OLLAMA_MAX_TOKENS", raw)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() with OLLAMA_MAX_TOKENS=%q error = nil, want error", raw)
+			}
+			if !strings.Contains(err.Error(), "OLLAMA_MAX_TOKENS") {
+				t.Errorf("error %q does not name OLLAMA_MAX_TOKENS", err)
+			}
+		})
+	}
+}
+
+func TestLoadOllamaInvalidMaxOutputChars(t *testing.T) {
+	for _, raw := range []string{"abc", "-1"} {
+		t.Run(raw, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("OLLAMA_MAX_OUTPUT_CHARS", raw)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() with OLLAMA_MAX_OUTPUT_CHARS=%q error = nil, want error", raw)
+			}
+			if !strings.Contains(err.Error(), "OLLAMA_MAX_OUTPUT_CHARS") {
+				t.Errorf("error %q does not name OLLAMA_MAX_OUTPUT_CHARS", err)
+			}
+		})
+	}
+}
+
+func TestLoadOllamaBlankSystemPromptUsesDefault(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("OLLAMA_SYSTEM_PROMPT", "   ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.Ollama.SystemPrompt != DefaultOllamaSystemPrompt {
+		t.Errorf("Ollama.SystemPrompt = %q, want DefaultOllamaSystemPrompt", cfg.Ollama.SystemPrompt)
+	}
+}
+
+func TestLoadOllamaDisabledStillValidates(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("OLLAMA_ENABLED", "false")
+	t.Setenv("OLLAMA_TEMPERATURE", "abc")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "OLLAMA_TEMPERATURE") {
+		t.Errorf("error %q does not name OLLAMA_TEMPERATURE", err)
+	}
+}
+
+func TestLoadOllamaInvalidValuesAggregated(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("OLLAMA_TIMEOUT_SECONDS", "0")
+	t.Setenv("OLLAMA_MAX_TOKENS", "abc")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "invalid configuration: ") {
+		t.Errorf("error %q is not an aggregated configuration error", msg)
+	}
+	for _, name := range []string{"OLLAMA_TIMEOUT_SECONDS", "OLLAMA_MAX_TOKENS"} {
+		if !strings.Contains(msg, name) {
+			t.Errorf("error %q does not name %s", msg, name)
 		}
 	}
 }

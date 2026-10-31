@@ -3,3 +3,7 @@
 .env.*
 !.env.example
 !.env.*.example
+
+# Local build artifacts from `go build ./cmd/server/`.
+/server
+/stocker-informer

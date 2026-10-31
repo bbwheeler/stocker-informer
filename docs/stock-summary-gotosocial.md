@@ -8,6 +8,12 @@
 
 **Spec:** This document. It is both the design record and the step-by-step implementation plan for the change requested on 2026-10-22.
 
+> **Update (2026-10-31):** the pipeline now rewrites each summary as a Cora-9
+> news report with Ollama before publication, falling back to the original
+> summary on any rewrite failure. See
+> `docs/plan-ollama-cora9-rewrite.md`. The rest of this document remains the
+> design record for the summary → GoToSocial pipeline.
+
 ## Global Constraints
 
 - **Module:** `github.com/example/stocker-informer`. **Go:** `1.25.0`. No new frameworks or linters; standard `gofmt` / `go vet` / `go test`.
