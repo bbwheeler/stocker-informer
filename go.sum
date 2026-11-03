@@ -1,5 +1,5 @@
-git.wheeli.ca/brian/stocker-store v0.0.0-20261010025329-1a26328c2930 h1:kk1L+giNWadyP7nXtkzJ1Z4EqpVcXEONJUxkrJW5UOY=
-git.wheeli.ca/brian/stocker-store v0.0.0-20261010025329-1a26328c2930/go.mod h1:2DoYqkEHkGH1v+eDj75M8n/tqJrbnuEk/0Gi74Rm9Zo=
+git.wheeli.ca/brian/stocker-store v0.0.0-20261102164629-ad46077e2dbe h1:NmpMz1aXeAKJmJla+5wYQY7XlYfJk93y15Nd6vpSlpg=
+git.wheeli.ca/brian/stocker-store v0.0.0-20261102164629-ad46077e2dbe/go.mod h1:oLHx5O8CE3OwmenKdLGNQd0yO5N8T43n+P+IDCem0pw=
 github.com/aws/aws-sdk-go-v2 v1.47.2 h1:4vrR4S7MUdvPiv/fxlYI/FaZCgwKuir2LpXxwCUtwWY=
 github.com/aws/aws-sdk-go-v2 v1.47.2/go.mod h1:LYKdgB/k1/omdrfoQuyt6T10CvF1yw27ByBjd+ku1jk=
 github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.21 h1:WKBWnr7CcxtexN5hlwQm3PQHpOiHC1yL2jT9xV1lst4=

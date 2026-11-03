@@ -3,7 +3,7 @@ module github.com/example/stocker-informer
 go 1.25.0
 
 require (
-	git.wheeli.ca/brian/stocker-store v0.0.0-20261010025329-1a26328c2930
+	git.wheeli.ca/brian/stocker-store v0.0.0-20261102164629-ad46077e2dbe
 	github.com/aws/aws-sdk-go-v2 v1.47.2
 	github.com/aws/aws-sdk-go-v2/config v1.33.8
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.8
