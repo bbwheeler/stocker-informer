@@ -33,10 +33,6 @@ func unsetEnv(t *testing.T, key string) {
 func setValidEnv(t *testing.T) {
 	t.Helper()
 
-	t.Setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-	t.Setenv("KAFKA_TOPIC", "stock.summary.available.v1")
-	t.Setenv("KAFKA_CONSUMER_GROUP", "stocker-informer")
-
 	for _, name := range []string{
 		"RABBITMQ_URL",
 		"RABBITMQ_INPUT_EXCHANGE",
@@ -112,9 +108,6 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadMissingRequired(t *testing.T) {
 	required := []string{
-		"KAFKA_BOOTSTRAP_SERVERS",
-		"KAFKA_TOPIC",
-		"KAFKA_CONSUMER_GROUP",
 		"GOTOSOCIAL_INSTANCE",
 		"GOTOSOCIAL_USER",
 		"GOTOSOCIAL_TOKEN",
@@ -341,105 +334,9 @@ func TestLoadS3PathPrefixNormalized(t *testing.T) {
 	}
 }
 
-func TestLoadBrokers(t *testing.T) {
-	setValidEnv(t)
-	t.Setenv("KAFKA_BOOTSTRAP_SERVERS", "a:1, b:2,,")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v, want nil", err)
-	}
-	got := cfg.KafkaServers()
-	want := []string{"a:1", "b:2"}
-	if len(got) != len(want) {
-		t.Fatalf("KafkaServers() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("KafkaServers()[%d] = %q, want %q", i, got[i], want[i])
-		}
-	}
-
-	t.Run("no non-empty broker", func(t *testing.T) {
-		setValidEnv(t)
-		t.Setenv("KAFKA_BOOTSTRAP_SERVERS", ",")
-
-		if _, err := Load(); err == nil {
-			t.Fatal("Load() error = nil, want error")
-		} else if !strings.Contains(err.Error(), "KAFKA_BOOTSTRAP_SERVERS") {
-			t.Errorf("error %q does not name KAFKA_BOOTSTRAP_SERVERS", err)
-		}
-	})
-}
-
-func TestLoadBrokerAddressValidation(t *testing.T) {
-	tests := []struct {
-		name      string
-		servers   string
-		wantErr   bool
-		wantParts []string
-	}{
-		{name: "localhost host", servers: "localhost:9092"},
-		{name: "ipv4 host", servers: "192.168.1.48:9094"},
-		{name: "ipv6 host", servers: "[::1]:9092"},
-		{name: "dns hostname", servers: "kafka.internal:9092"},
-		{name: "list with empties", servers: "a:1, b:2,,"},
-		{name: "missing port", servers: "localhost", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "host:port"}},
-		{name: "empty host", servers: ":9092", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "host and a port"}},
-		{name: "empty port", servers: "localhost:", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "host and a port"}},
-		{name: "non numeric port", servers: "localhost:abc", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "invalid port"}},
-		{name: "zero port", servers: "localhost:0", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "invalid port"}},
-		{name: "port too large", servers: "localhost:70000", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "invalid port"}},
-		{name: "url form", servers: "http://localhost:9092", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "host:port"}},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			setValidEnv(t)
-			t.Setenv("KAFKA_BOOTSTRAP_SERVERS", tc.servers)
-
-			_, err := Load()
-			if !tc.wantErr {
-				if err != nil {
-					t.Fatalf("Load() error = %v, want nil", err)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatalf("Load() with %q error = nil, want error", tc.servers)
-			}
-			for _, part := range tc.wantParts {
-				if !strings.Contains(err.Error(), part) {
-					t.Errorf("error %q does not contain %q", err, part)
-				}
-			}
-		})
-	}
-}
-
-func TestLoadInvalidBrokerAggregates(t *testing.T) {
-	setValidEnv(t)
-	t.Setenv("KAFKA_BOOTSTRAP_SERVERS", "bogus,also-bad")
-	t.Setenv("KAFKA_TOPIC", "")
-
-	_, err := Load()
-	if err == nil {
-		t.Fatal("Load() error = nil, want error")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "invalid configuration:") {
-		t.Errorf("error %q is not aggregated", msg)
-	}
-	for _, name := range []string{"KAFKA_BOOTSTRAP_SERVERS", "KAFKA_TOPIC"} {
-		if !strings.Contains(msg, name) {
-			t.Errorf("error %q does not name %s", msg, name)
-		}
-	}
-}
-
 func TestLoadAggregatesErrors(t *testing.T) {
 	setValidEnv(t)
-	t.Setenv("KAFKA_TOPIC", "")
+	t.Setenv("GOTOSOCIAL_USER", "")
 	t.Setenv("S3_BUCKET", "")
 
 	_, err := Load()
@@ -450,7 +347,7 @@ func TestLoadAggregatesErrors(t *testing.T) {
 	if !strings.Contains(msg, "invalid configuration:") {
 		t.Errorf("error %q is not aggregated", msg)
 	}
-	for _, name := range []string{"KAFKA_TOPIC", "S3_BUCKET"} {
+	for _, name := range []string{"GOTOSOCIAL_USER", "S3_BUCKET"} {
 		if !strings.Contains(msg, name) {
 			t.Errorf("error %q does not name %s", msg, name)
 		}
@@ -459,7 +356,7 @@ func TestLoadAggregatesErrors(t *testing.T) {
 
 func TestLoadErrorsDoNotLeakSecrets(t *testing.T) {
 	setValidEnv(t)
-	t.Setenv("KAFKA_TOPIC", "")
+	t.Setenv("S3_BUCKET", "")
 
 	_, err := Load()
 	if err == nil {
@@ -731,27 +628,6 @@ func TestLoadRabbitMQDefaults(t *testing.T) {
 	}
 	if cfg.RabbitMQ != want {
 		t.Errorf("RabbitMQ = %+v, want %+v", cfg.RabbitMQ, want)
-	}
-}
-
-// TestLoadLegacyBrokerStillRequired pins the Step 1 contract: the legacy
-// transport stays wired until the cut-over, so its variables remain required
-// even though every RabbitMQ setting now has a usable default.
-func TestLoadLegacyBrokerStillRequired(t *testing.T) {
-	setValidEnv(t)
-	names := []string{"KAFKA_BOOTSTRAP_SERVERS", "KAFKA_TOPIC", "KAFKA_CONSUMER_GROUP"}
-	for _, name := range names {
-		t.Setenv(name, "")
-	}
-
-	_, err := Load()
-	if err == nil {
-		t.Fatal("Load() error = nil, want error")
-	}
-	for _, name := range names {
-		if !strings.Contains(err.Error(), name) {
-			t.Errorf("error %q does not name %s", err, name)
-		}
 	}
 }
 

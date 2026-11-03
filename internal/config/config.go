@@ -100,10 +100,6 @@ type RabbitMQConfig struct {
 }
 
 type Config struct {
-	KafkaBootstrapServers string
-	KafkaTopic            string
-	KafkaConsumerGroup    string
-
 	GotoSocialInstance  string
 	GotoSocialUser      string
 	GotoSocialToken     string
@@ -122,10 +118,6 @@ type Config struct {
 // error that names each offending variable; secret values are never included.
 func Load() (*Config, error) {
 	cfg := &Config{
-		KafkaBootstrapServers: strings.TrimSpace(getEnv("KAFKA_BOOTSTRAP_SERVERS", "")),
-		KafkaTopic:            strings.TrimSpace(getEnv("KAFKA_TOPIC", "")),
-		KafkaConsumerGroup:    strings.TrimSpace(getEnv("KAFKA_CONSUMER_GROUP", "")),
-
 		GotoSocialInstance: strings.TrimSpace(getEnv("GOTOSOCIAL_INSTANCE", "")),
 		GotoSocialUser:     strings.TrimSpace(getEnv("GOTOSOCIAL_USER", "")),
 		GotoSocialToken:    strings.TrimSpace(getEnv("GOTOSOCIAL_TOKEN", "")),
@@ -149,8 +141,6 @@ func Load() (*Config, error) {
 		name  string
 		value string
 	}{
-		{"KAFKA_TOPIC", cfg.KafkaTopic},
-		{"KAFKA_CONSUMER_GROUP", cfg.KafkaConsumerGroup},
 		{"GOTOSOCIAL_INSTANCE", cfg.GotoSocialInstance},
 		{"GOTOSOCIAL_USER", cfg.GotoSocialUser},
 		{"GOTOSOCIAL_TOKEN", cfg.GotoSocialToken},
@@ -161,18 +151,6 @@ func Load() (*Config, error) {
 	for _, v := range required {
 		if v.value == "" {
 			add("%s is required and must be non-empty", v.name)
-		}
-	}
-
-	if cfg.KafkaBootstrapServers == "" {
-		add("KAFKA_BOOTSTRAP_SERVERS is required and must be non-empty")
-	} else if len(cfg.KafkaServers()) == 0 {
-		add("KAFKA_BOOTSTRAP_SERVERS must contain at least one non-empty broker")
-	} else {
-		for _, entry := range cfg.KafkaServers() {
-			if err := validateBroker(entry); err != nil {
-				add("%v", err)
-			}
 		}
 	}
 
@@ -333,8 +311,7 @@ func loadRabbitMQConfig(add errorFunc) RabbitMQConfig {
 }
 
 // rabbitMQURL validates and returns the broker URL. The value is never echoed
-// in an error, and a blank value falls back to the default so the legacy
-// behaviour of getEnv is preserved.
+// in an error, and a blank value falls back to the default like getEnv does.
 func rabbitMQURL(add errorFunc) string {
 	raw := strings.TrimSpace(getEnv("RABBITMQ_URL", defaultRabbitMQURL))
 	if err := validateAMQPURL(raw); err != nil {
@@ -542,23 +519,6 @@ func validateURL(name, raw string) error {
 	return fmt.Errorf("%s must be an absolute URL with scheme and host (got %q)", name, raw)
 }
 
-// validateBroker checks that a bootstrap entry is host:port with a numeric
-// port in 1-65535. No DNS lookup is performed and hostnames are not rejected.
-func validateBroker(entry string) error {
-	host, port, err := net.SplitHostPort(entry)
-	if err != nil {
-		return fmt.Errorf("KAFKA_BOOTSTRAP_SERVERS entry %q must be host:port", entry)
-	}
-	if host == "" || port == "" {
-		return fmt.Errorf("KAFKA_BOOTSTRAP_SERVERS entry %q must include a host and a port", entry)
-	}
-	n, err := strconv.Atoi(port)
-	if err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("KAFKA_BOOTSTRAP_SERVERS entry %q has an invalid port (must be 1-65535)", entry)
-	}
-	return nil
-}
-
 // normalizePrefix trims slashes and drops empty segments from S3_PATH_PREFIX.
 func normalizePrefix(raw string) string {
 	parts := strings.Split(strings.TrimSpace(raw), "/")
@@ -576,19 +536,4 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func (c *Config) KafkaServers() []string {
-	if c.KafkaBootstrapServers == "" {
-		return nil
-	}
-	servers := strings.Split(c.KafkaBootstrapServers, ",")
-	result := make([]string, 0, len(servers))
-	for _, s := range servers {
-		s = strings.TrimSpace(s)
-		if s != "" {
-			result = append(result, s)
-		}
-	}
-	return result
 }
