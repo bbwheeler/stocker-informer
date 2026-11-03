@@ -563,14 +563,11 @@ stocker-informer/
 ├── .gitignore
 ├── AGENTS.md
 ├── Containerfile
-├── review.md
 ├── go.mod
 ├── go.sum
 ├── README.md
 ├── docs/
-│   ├── deployment.md
-│   ├── plan-ollama-cora9-rewrite.md
-│   └── stock-summary-gotosocial.md
+│   └── deployment.md
 ├── cmd/server/main.go
 ├── internal/config/config.go
 ├── internal/rabbitmq/consumer.go

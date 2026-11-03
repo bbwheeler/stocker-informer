@@ -11,29 +11,34 @@
 > **Configuration update (2026-10-22):** the service now consumes protobuf
 > `stockstore.v1.Stock`, reads `summary.md` from Garage/S3, and publishes
 > Markdown with a configurable GoToSocial audience. Environment variables,
-> dependencies, and the Containerfile changed; see
-> `docs/stock-summary-gotosocial.md` and the README. Deployment mechanics
-> (single rootless quadlet, `deploy/push.sh`, image name,
-> `~/.config/stocker-informer/.env.podman`) are unchanged.
+> dependencies, and the Containerfile changed; see the README for the current
+> list. Deployment mechanics (single rootless quadlet, `deploy/push.sh`, image
+> name, `~/.config/stocker-informer/.env.podman`) are unchanged.
 
 > **Configuration update (2026-10-31):** summaries are now rewritten by an
 > Ollama instance as a Cora-9 news report before publication. Eight optional
-> `OLLAMA_*` variables were added; see
-> `docs/plan-ollama-cora9-rewrite.md`. Deployment mechanics (single rootless
-> quadlet, `deploy/push.sh`, image name,
+> `OLLAMA_*` variables were added; see the README. Deployment mechanics
+> (single rootless quadlet, `deploy/push.sh`, image name,
 > `~/.config/stocker-informer/.env.podman`) are unchanged.
+
+> **Transport update (2026-11-03):** the service consumes summary signals from
+> RabbitMQ over `github.com/rabbitmq/amqp091-go` instead of the legacy broker.
+> Seven optional `RABBITMQ_*` variables replace the legacy trio; the broker is
+> remote, so the quadlet needs only `After=network-online.target` and the
+> consumer retries on its own. See the README and **Troubleshooting RabbitMQ
+> connectivity** at the end of this document.
 
 ## Global Constraints
 
 - **Module:** `github.com/example/stocker-informer`. **Go:** 1.25.
-- **Build:** `go build ./cmd/server/`. **Test:** `go test ./...` (a no-op — no test files).
-- **Kafka dep:** `github.com/segmentio/kafka-go`. **No CI, no Makefile, no linter** — only standard Go conventions and the `bash -n` syntax check.
+- **Build:** `go build ./cmd/server/`. **Test:** `go test ./...` (all unit tests run offline).
+- **RabbitMQ dep:** `github.com/rabbitmq/amqp091-go` v1.16.0. **No CI, no Makefile, no linter** — only standard Go conventions (`gofmt -l .`, `go vet ./...`) and the `bash -n` syntax check.
 - **Registry + image name (single source of truth):** `git.wheeli.ca/brian/stocker-informer:latest`. The quadlet's `Image=` and `push.sh`'s pushed name MUST match this verbatim.
 - **User config path (single source of truth):** `~/.config/stocker-informer/.env.podman` (the quadlet references it as `%h/.config/stocker-informer/.env.podman`).
 - **`push.sh` MUST be mode `0755`** (executable). The quadlet MUST be mode `0644`.
-- **Configuration:** superseded by `docs/stock-summary-gotosocial.md` §3 and extended by `docs/plan-ollama-cora9-rewrite.md` §3. The service now requires nine variables (`KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_TOPIC`, `KAFKA_CONSUMER_GROUP`, `GOTOSOCIAL_INSTANCE`, `GOTOSOCIAL_USER`, `GOTOSOCIAL_TOKEN`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) plus fourteen optional ones (the GoToSocial/S3 defaults and the eight `OLLAMA_*` settings); see those plans and the README for the current list. This document's historical six-variable list below applies only to the superseded deployment task list.
-- **Source changes:** this plan's "do not modify `Containerfile`, `cmd/`, or `internal/`" constraint applied to the deployment-only work. The stock summary feature updated the `Containerfile` (module caching, `GOPRIVATE`) and `cmd/`/`internal/`; see `docs/stock-summary-gotosocial.md` for the current target state.
-- **After all tasks:** the working tree must be `git status`-clean in spirit (no stray/new files except `docs/deployment.md`), and no references to `install.sh`, `publish.sh`, or `stocker-informer.build` may remain in any tracked `*.md` except historical mentions inside `review.md` (see Task 18).
+- **Configuration:** six required variables (`GOTOSOCIAL_INSTANCE`, `GOTOSOCIAL_USER`, `GOTOSOCIAL_TOKEN`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) plus twenty-one optional ones (the GoToSocial/S3 defaults, the seven `RABBITMQ_*` settings, and the eight `OLLAMA_*` settings); see the README and `AGENTS.md` for the authoritative list. Every RabbitMQ setting has a working default, so a deployment needs no broker variable at all unless it overrides one.
+- **Source changes:** this plan's "do not modify `Containerfile`, `cmd/`, or `internal/`" constraint applied to the deployment-only work. The stock summary feature and the RabbitMQ transport updated the `Containerfile` (module caching, `GOPRIVATE`) and `cmd/`/`internal/`; see the README for the current target state.
+- **After all tasks:** the working tree must be `git status`-clean in spirit (no stray/new files except `docs/deployment.md`), and no references to `install.sh`, `publish.sh`, or `stocker-informer.build` may remain in any tracked `*.md` (see Task 18).
 
 ---
 
@@ -50,7 +55,7 @@ Mirror the `stocker-store` reference **and** keep the hardening. Rationale per l
 | `EnvironmentFile=` | `%h/.config/stocker-informer/.env.podman` | same shape | **Keep** | Operator-owned env file path (Global Constraint). |
 | `PodmanArgs=--read-only` | **present** | *(absent)* | **Keep** | The runtime image is `gcr.io/distroless/static-debian12` running as non-root `65534` with a **static** (non-dynamic linker, no libc at runtime) binary. A read-only root FS is a genuine, zero-cost hardening win for a Go daemon that never writes files. Diverges from the reference on purpose — documented. |
 | `PodmanArgs=--tmpfs=/tmp:rw,noexec,nosuid,size=64m` | **present** | *(absent)* | **Keep** | Lets the container have a small writable scratch `/tmp` while the rest stays read-only; `noexec,nosuid` block executing and setuid'ing files off it. Diverges from the reference on purpose — documented. |
-| `AutoUpdate=` | `local` | `registry` | **Change to `registry`** | `local` auto-updates from a **local** image file, which we no longer build on the host — it's meaningless here. `registry` re-pulls a new `:latest` on auto-update — correct for consuming a registry-published image. Matches reference; also resolves review.md item #28. |
+| `AutoUpdate=` | `local` | `registry` | **Change to `registry`** | `local` auto-updates from a **local** image file, which we no longer build on the host — it's meaningless here. `registry` re-pulls a new `:latest` on auto-update — correct for consuming a registry-published image. Matches reference. |
 | `[Service] Restart=` | `always` | `always` | **Keep** | — |
 | `[Service] RestartSec=` | `5` | `10` | **Change to `10`** | Reference parity; slightly gentler restart cadence. |
 | `[Install] WantedBy=` | `default.target` | `default.target` | **Keep** | Start on user login. |
@@ -65,9 +70,9 @@ Keep the reference's single-tag (`:latest`) build + push (drop the old `publish.
 
 `AGENTS.md` documents module, Go version, build/test commands, package structure, env vars, and the credentials pointer. It contains **no** reference to `deploy/`, `install.sh`, `publish.sh`, the `.build` unit, or `.env.podman` (verified by grep). It stays accurate after this work. **Do not modify it.**
 
-### D4 — `review.md`: LEAVE AS-IS
+### D4 — `review.md`: historical audit, since deleted
 
-`review.md` is a point-in-time audit snapshot. It references `install.sh`, `publish.sh`, and `.env.podman`, but only inside historical numbered findings (#22, #23, #31, #32) describing what *was* in the repo at audit time — **not** as operational instructions. Modifying it would corrupt the historical record. **Leave it untouched.** (Optional, only if a reviewer disagrees: prepend a one-line `> _Historical audit snapshot (as of <date>); artifact names it cites are superseded by the single-quadlet deployment documented in `docs/deployment.md`._`)
+`review.md` was a point-in-time audit snapshot covering `install.sh`, `publish.sh`, and `.env.podman` inside historical numbered findings (#22, #23, #31, #32) describing what *was* in the repo at audit time. It has since been deleted from the repository (its findings were addressed or superseded, and it named the retired message broker); git history preserves it.
 
 ### D5 — `go.sum` (keep the caveat, soften from "install.sh")
 
@@ -80,7 +85,7 @@ Keep the reference's single-tag (`:latest`) build + push (drop the old `publish.
 **KEEP (unchanged):**
 - `Containerfile` — correct two-stage static/non-root build.
 - `deploy/quadlet/stocker-informer.container` — **rewritten** in-place to the single-quadlet target (below).
-- All of `cmd/`, `internal/`, `go.mod`, `AGENTS.md`, `review.md`.
+- All of `cmd/`, `internal/`, `go.mod`, `AGENTS.md`.
 
 **ADD (new):**
 - `deploy/push.sh` (mode `0755`) — builds + pushes to the registry.
@@ -361,10 +366,10 @@ WantedBy=default.target
   You author this file yourself (it is **not** shipped in this repo) at `~/.config/stocker-informer/.env.podman`. Sample:
   ```
 
-  The fenced `# --- Kafka ---` sample block itself (lines 154–167) and the closing sentence on line 169 ("The Kafka trio ships with development example values …") are otherwise fine; optionally adjust the closing sentence to:
+  The section now points at the shipped placeholder-only template `deploy/quadlet/.env.podman.example` (copy it, then replace every `REPLACE_ME`); the closing sentence reads:
 
   ```markdown
-  Fill in the GoToSocial trio before the service will start; the Kafka value `localhost:9092` is a development-only placeholder.
+  Fill in the GoToSocial, S3, and RabbitMQ values before the service will start; `REPLACE_ME` placeholders stand in for every secret.
   ```
 
 **Verification:** `grep -n 'The shipped .env.podman template' README.md` → no match; `grep -n '~/.config/stocker-informer/.env.podman' README.md` → present.
@@ -439,7 +444,7 @@ WantedBy=default.target
   Setup (rootless, no sudo; the env file is **not** shipped — you create it):
 
   ```bash
-  # 1. Author the config (fill in GOTOSOCIAL_* + KAFKA_* before starting)
+  # 1. Author the config (fill in GOTOSOCIAL_* + S3_* + RABBITMQ_* before starting)
   mkdir -p ~/.config/stocker-informer
   nano ~/.config/stocker-informer/.env.podman   # see "Environment Variables" / "Example env file"
 
@@ -508,7 +513,7 @@ WantedBy=default.target
   The shortest path to a running, rootless service:
 
   1. **Write the env file** (the file is not shipped — you author it):
-     `mkdir -p ~/.config/stocker-informer` and create `~/.config/stocker-informer/.env.podman` with the six required vars (see **Environment Variables**); fill `GOTOSOCIAL_INSTANCE` / `GOTOSOCIAL_USER` / `GOTOSOCIAL_TOKEN` and `KAFKA_*`.
+     `mkdir -p ~/.config/stocker-informer` and create `~/.config/stocker-informer/.env.podman` with the six required vars (see **Environment Variables**); fill `GOTOSOCIAL_INSTANCE` / `GOTOSOCIAL_USER` / `GOTOSOCIAL_TOKEN`, the `S3_*` values, and any `RABBITMQ_*` overrides you need (every RabbitMQ variable has a working default).
 
   2. **Build + push the image** to the registry (no root):
      `./deploy/push.sh`
@@ -534,13 +539,14 @@ WantedBy=default.target
   stocker-informer/
   ├── AGENTS.md
   ├── Containerfile
-  ├── review.md
   ├── go.mod
   ├── README.md
   ├── docs/deployment.md
   ├── cmd/server/main.go
   ├── internal/config/config.go
-  ├── internal/kafka/consumer.go
+  ├── internal/rabbitmq/consumer.go
+  ├── internal/rabbitmq/session.go
+  ├── internal/rabbitmq/probe.go
   ├── internal/messenger/messenger.go
   ├── internal/messenger/gotosocial_publisher.go
   ├── internal/messenger/stock_event_formatter.go
@@ -550,9 +556,9 @@ WantedBy=default.target
                      └── stocker-informer.container
   ```
 
-> The tree above is the target repository structure (note `deploy/push.sh` + a single `deploy/quadlet/stocker-informer.container`, no `install.sh`/`publish.sh`/`.build`, no shipped `.env.podman`). **Note to the developer (ordering):** list `docs/deployment.md` in the tree even though it is created by this plan's deliverable step (see "After all tasks" below) so the documented tree matches the repo.
+> The tree above is the target repository structure (note `deploy/push.sh` + a single `deploy/quadlet/stocker-informer.container`, no `install.sh`/`publish.sh`/`.build`, no shipped `.env.podman`, and the RabbitMQ package in place of the legacy transport package). **Note to the developer (ordering):** list `docs/deployment.md` in the tree even though it is created by this plan's deliverable step (see "After all tasks" below) so the documented tree matches the repo. The historical plan documents and `review.md` were deleted later (see the transport update at the top of this file), so they do not appear.
 
-**Verification:** `grep -n 'install.sh\|publish.sh\|stocker-informer\.build' README.md` → no matches anywhere in the file (outside `review.md`, which is a separate historical file).
+**Verification:** `grep -n 'install.sh\|publish.sh\|stocker-informer\.build' README.md` → no matches anywhere in the file.
 
 ---
 
@@ -571,15 +577,11 @@ WantedBy=default.target
   - `go.sum` is not committed; run `go mod download` / `go mod tidy` once locally before building the container image (via `deploy/push.sh` or `podman build`), or the container build can fail on unresolved module hashes (see D5).
   ```
 
-- [ ] **Step 14.2: Replace the last bullet (line 362)**:
+- [ ] **Step 14.2: Replace the last bullet (line 362)** so it reflects the placeholder-only env template:
 
-  Current:
-  ```markdown
-  - `KAFKA_BOOTSTRAP_SERVERS` in the shipped `.env.podman` defaults to `localhost:9092` (development-only) and must be changed for real deployments.
-  ```
   New:
   ```markdown
-  - The operator-authored `~/.config/stocker-informer/.env.podman` sample shows `KAFKA_BOOTSTRAP_SERVERS=localhost:9092` (development-only); it is not shipped in this repo and must be changed for real deployments.
+  - The operator-authored `~/.config/stocker-informer/.env.podman` is not shipped in this repo; `deploy/quadlet/.env.podman.example` contains placeholders only (`REPLACE_ME`, plus a commented-out `RABBITMQ_URL` line) and must be edited for real deployments.
   ```
 
   (All other known-limitation bullets are unchanged.)
@@ -630,15 +632,14 @@ WantedBy=default.target
   ```
   Expected after Tasks 6–15: **zero** matches (each should have been replaced). If any remain, replace using the target wording established in the relevant task (Prerequisites → Task 6; Installation → Task 7; env file → Task 8; container run → Task 9; quadlet → Task 10; publishing → Task 11; repo tree → Task 13; known limitations → Task 14).
 
-- [ ] **Step 16.2: Confirm `AGENTS.md` and `review.md` need no edit** (D3, D4):
+- [ ] **Step 16.2: Confirm `AGENTS.md` needs no edit** (D3):
 
   Run:
   ```bash
   grep -n 'install\.sh\|publish\.sh' AGENTS.md        # Expected: no matches (AGENTS unchanged)
-  grep -n 'install\.sh\|publish\.sh\|stocker-informer\.build' review.md   # Expected: matches only inside historical findings #22/#23/#31/#32 (leave as-is)
   ```
 
-**Verification:** Whole-README sweep is clean; `AGENTS.md` untouched; `review.md` references are intentionally historical.
+**Verification:** Whole-README sweep is clean; `AGENTS.md` untouched.
 
 ---
 
@@ -693,13 +694,13 @@ WantedBy=default.target
   Run: `git status --porcelain`
   Expected: only the intended changes (M README.md, D deploy/install.sh, D deploy/quadlet/stocker-informer.build, D deploy/publish.sh, D .env.podman, A deploy/push.sh, M deploy/quadlet/stocker-informer.container, A docs/deployment.md).
 
-- [ ] **Step 18.6: Repo-wide `.md` check for stale references (excluding historical `review.md`):**
+- [ ] **Step 18.6: Repo-wide `.md` check for stale references:**
 
   Run:
   ```bash
-  grep -rn --exclude=review.md 'install\.sh\|publish\.sh\|stocker-informer\.build' --include=*.md . || echo "OK: no stale references outside review.md"
+  grep -rn 'install\.sh\|publish\.sh\|stocker-informer\.build' --include=*.md . || echo "OK: no stale references"
   ```
-  Expected: `OK: no stale references outside review.md`.
+  Expected: `OK: no stale references`.
 
 - [ ] **Step 18.7: Stage and commit:**
 
@@ -713,92 +714,132 @@ WantedBy=default.target
 - [ ] `git status` clean after commit.
 - [ ] Single quadlet matches the reference's *structure* and includes the retained hardening (D1); mode `0644`.
 - [ ] `deploy/push.sh` mode `0755`; pushes `git.wheeli.ca/brian/stocker-informer:latest` (= quadlet `Image=`).
-- [ ] No `install.sh`, `publish.sh`, or `stocker-informer.build` referenced in any non-`review.md` doc.
+- [ ] No `install.sh`, `publish.sh`, or `stocker-informer.build` referenced in any doc.
 - [ ] `README.md` documents: single quadlet, `deploy/push.sh`, an inlined sample `~/.config/stocker-informer/.env.podman`, a Quickstart, repository structure, and consistent known-limitations.
-- [ ] `AGENTS.md` and `review.md` intentionally unmodified.
+- [ ] `AGENTS.md` intentionally unmodified by this deployment work.
 
 ---
 
-## Troubleshooting Kafka connectivity
 
-Operator guide for the Kafka-side failure signatures this service can log. The
-service self-heals from broker restarts with no operator action; use this
+## Manual end-to-end check (RabbitMQ + S3 + GoToSocial)
+
+1. Confirm the summary object exists:
+
+   ```bash
+   aws --endpoint-url "$S3_ENDPOINT" s3 ls "s3://$S3_BUCKET/NASDAQ/AAPL/summary.md"
+   ```
+
+2. Publish a protobuf signal to the input exchange with the configured routing key. Encode the body with the `stocker-store` proto, then publish it (management UI, `rabbitmqadmin`, or a small Go producer all work):
+
+   ```bash
+   BODY=$(printf 'symbol: "AAPL"\nexchange: "NASDAQ"\n' | \
+     protoc -I /home/brian/workspace/stocker-store -I /usr/include \
+       --encode=stockstore.v1.Stock \
+       /home/brian/workspace/stocker-store/proto/v1/stock_store.proto | base64 -w0)
+   rabbitmqadmin publish exchange=stock.summary \
+     routing_key=stock.summary.available.v1 \
+     payload_encoding=base64 payload="$BODY"
+   ```
+
+3. Watch the daemon logs for:
+
+   ```text
+   configuration loaded
+   rabbitmq consumer started
+   rabbitmq consumer connected
+   summary published on GoToSocial   symbol=AAPL exchange=NASDAQ routing_key=stock.summary.available.v1 rewritten=true
+   ```
+
+4. Confirm the post on the instance matches the summary Markdown and the configured audience. For `direct`, confirm the mention is at the start.
+
+5. Negative checks:
+   - Publish a `Stock{symbol:"", exchange:"NASDAQ"}` → `decode stock failed`, delivery acked, no post.
+   - Publish a stock with no S3 object → `summary not found`, delivery acked, no post.
+   - Set an invalid `GOTOSOCIAL_AUDIENCE` → startup exits `1` naming the variable.
+   - `GET /health` returns `503` until the probe passively verifies the exchange and queue, then `200`.
+
+---
+
+## Troubleshooting RabbitMQ connectivity
+
+Operator guide for the RabbitMQ-side failure signatures this service can log.
+The service self-heals from broker restarts with no operator action; use this
 section when the errors are sustained or the consumer stays silent.
 
 ### Log signatures
 
 | Signature | Meaning | Transient? |
 | --- | --- | --- |
-| `kafka client error` with `detail` containing `read tcp ...: read: connection reset by peer` | The broker closed the connection mid-request (broker restart, load balancer, or broker death). | During a broker restart: yes. Sustained: no — a broker or network fault. |
-| `kafka client error` with `detail` containing `[15] Group Coordinator Not Available` | `__consumer_offsets` has no loaded coordinator yet for the consumer group. | Yes; clears once a coordinator is elected and the group rejoins. |
-| `kafka consumer started` followed by no `summary published on GoToSocial` and no errors | The consumer is waiting — topic/group mismatch or an empty topic. | **No** — a configuration problem; fix the topic/group. |
-
-**The ~5-second spacing between coordinator errors is kafka-go's
-`JoinGroupBackoff`** (`ReaderConfig.JoinGroupBackoff`), not an application
-backoff. Retries are automatic and need no operator action — wait for the
-coordinator to recover.
+| `rabbitmq connect failed, backing off` with `error` containing `connection refused` | Broker down, wrong host/port, or wrong scheme (`amqp` vs `amqps`). | Only if the broker is restarting; otherwise a configuration or network fault. |
+| `rabbitmq consumer connection lost` with `error` containing `EOF` or `connection reset by peer` | Broker restarted, connection dropped, or network flap. | Yes; the consumer reconnects with 1 s→30 s backoff. |
+| `rabbitmq connectivity probe failed` with a `NOT_FOUND` (404) error | Exchange or queue not declared yet, or names are wrong. | Startup: briefly, until the consumer declares. Sustained: configuration error. |
+| `rabbitmq connectivity probe failed` with `PRECONDITION_FAILED` (406) | An existing exchange/queue has different type/durability/flags/arguments than configured. | No; requires operator action. |
+| `ack delivery failed` with `consumer: session closed` | Session died mid-delivery; the broker requeued the delivery. | Yes, but expect a possible duplicate publication. |
+| `rabbitmq consumer started` then no `summary published on GoToSocial` and no errors | Wrong routing key, missing binding, or a producer writing elsewhere. | No; configuration problem. |
 
 ### Broker-side checklist
 
-- Broker processes are up on every address in `KAFKA_BOOTSTRAP_SERVERS`.
-- KRaft quorum voters are reachable (no ongoing election).
-- `offsets.topic.replication.factor` is ≤ the number of live brokers.
-- A `__consumer_offsets` topic exists with all partitions online.
-- `log.dirs` points at persistent storage — not `/tmp`, which discards logs
-  and consumer-group state on every restart.
-- `KAFKA_TOPIC` exactly matches the topic the producer writes (the match is
-  case-sensitive).
+- Broker is running and reachable on the configured host/port; `amqps://` requires TLS on that port.
+- The vhost in `RABBITMQ_URL` exists (`/` by default).
+- The user in `RABBITMQ_URL` can **configure, write, and read** on the exchange and queue (declaration needs `configure`).
+- Exchange `stock.summary` exists as type `topic`, durable.
+- Queue `stocker-informer` exists as durable, non-exclusive, non-auto-delete.
+- Binding: exchange `stock.summary`, queue `stocker-informer`, routing key `stock.summary.available.v1`.
+- No declaration mismatch (406) from a previous deployment with different flags.
+- The producer (`stocker-summarizer`) publishes to the same exchange/routing key and its messages are not expiring before consumption.
 
 ### Verification commands
 
-Use the standard Apache Kafka command-line tools:
-
 ```bash
-# Topic exists and has all partitions online
-kafka-topics.sh --bootstrap-server <brokers> --describe --topic <KAFKA_TOPIC>
-
-# Group state is Stable with a partition assignment
-kafka-consumer-groups.sh --bootstrap-server <brokers> --describe --group <KAFKA_CONSUMER_GROUP>
-
-# Records actually exist on the topic
-kafka-console-consumer.sh --bootstrap-server <brokers> --topic <KAFKA_TOPIC> --max-messages 1
+rabbitmqctl list_exchanges name type durable
+rabbitmqctl list_queues name durable messages messages_ready messages_unacknowledged consumers
+rabbitmqctl list_bindings source_name destination_name routing_key
+rabbitmqctl list_connections name peer_host state
+rabbitmqctl list_channels connection number consumer_count messages_unacknowledged
+# Publish one test message (management UI or rabbitmqadmin also work):
+#   exchange stock.summary, routing key stock.summary.available.v1,
+#   payload = protobuf stockstore.v1.Stock{symbol:"AAPL",exchange:"NASDAQ"}
 ```
 
-### Zero-fault-tolerance quorums
+### 406 PRECONDITION_FAILED
 
-A 2-voter KRaft quorum on a single host survives **no** broker failure: any
-restart of that host produces exactly the errors above until the quorum and
-group coordinator recover (observed: ~12 minutes in one incident). If this
-matters operationally, run a third quorum voter on a separate host and keep
-`log.dirs` persistent.
+The exchange or queue already exists with different properties (`type`,
+`durable`, `auto_delete`, `exclusive`, or arguments). The consumer cannot fix
+this by itself: stop the service, inspect with the commands above, then either
+correct the environment to match the existing object or delete the
+service-owned object and let the consumer recreate it. Do not delete a shared
+exchange that producers still use.
 
-### Auto-created topics hide a mistyped topic name
+### 404 NOT_FOUND
 
-With `auto.create.topics.enable=true`, a mistyped `KAFKA_TOPIC` is created
-empty on first metadata access. The consumer is "connected", `/health` can
-report `200`, but no records ever arrive. Always confirm the topic name and
-that a producer writes to it.
+On a fresh deployment the probe can see 404s until the consumer's first connect
+declares the topology. If the 404s persist, check the exchange/queue names and
+the vhost.
 
-### Shipped vs deployed configuration drift
+### Credentials and permissions (ACCESS_REFUSED)
 
-This drift is operator-side, **not** a repository defect. The shipped example
-`deploy/quadlet/.env.podman.example` uses
-`KAFKA_BOOTSTRAP_SERVERS=192.168.1.71:9092,192.168.1.75:9092` and
-`KAFKA_TOPIC=stock.summary.available.v1`. The deployed operator instance uses
-`192.168.1.48:9092,192.168.1.48:9094`, topic `stocker.gems.v1`, and
-`S3_ENDPOINT=http://192.168.1.31:30188`. The shipped
-defaults are **unchanged**; the operator's env file
-(`~/.config/stocker-informer/.env.podman`) is authoritative. Verify the
-active configuration from the logs: the `configuration loaded` line
-(`kafka_topic`, `s3_endpoint`) and the `kafka consumer started` line
-(`brokers`, `topic`, `group`).
+`ACCESS_REFUSED` means the user cannot access the vhost or lacks
+configure/write/read permission. Verify with
+`rabbitmqctl authenticate_user <user> <password>` and
+`rabbitmqctl list_permissions -p <vhost>`. The URL is never logged; confirm the
+deployed value in the operator's env file, not in logs.
 
 ### Readiness semantics
 
-`/health` returns `503` `{"status":"starting","version":"..."}` until the
-connectivity probe first verifies metadata for `KAFKA_TOPIC` (logged as
-`kafka connectivity verified`), then `200` `{"status":"ok","version":"..."}`.
-Readiness is **sticky**: a later loss logs `kafka connectivity lost` (once,
-then at `Debug`) and recovery logs `kafka connectivity restored`, but the
-endpoint does not flip back to `503` — that is deliberate, to avoid restart
-loops; the logs are the signal for post-startup outages.
+`/health` returns `503` `{"status":"starting","version":"..."}` until the first
+successful passive verification (logged as `rabbitmq connectivity verified`),
+then `200` `{"status":"ok","version":"..."}`. Readiness is **sticky**: a later
+loss logs `rabbitmq connectivity lost` and recovery logs
+`rabbitmq connectivity restored`, but the endpoint does not flip back to
+`503` — that is deliberate, to avoid restart loops. Post-startup outages are
+visible in logs, not in `/health`.
+
+### Configuration drift
+
+The operator's `~/.config/stocker-informer/.env.podman` is authoritative. The
+`configuration loaded` log shows the redacted broker plus exchange, type,
+routing key, queue, and prefetch; the `rabbitmq consumer connected` log
+repeats the topology. The shipped template
+`deploy/quadlet/.env.podman.example` carries only the defaults and
+`REPLACE_ME` placeholders (`RABBITMQ_URL` is commented out, so the built-in
+shared-test-broker default applies until the operator sets it).
