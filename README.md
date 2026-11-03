@@ -1,12 +1,15 @@
 # stocker-informer
 
-`stocker-informer` is a long-running Go daemon that consumes protobuf stock summary signals from Kafka, reads each stock's Markdown `summary.md` from Garage/S3, rewrites it as a Cora-9 news report with a configurable Ollama instance, and publishes the resulting Markdown to a GoToSocial instance. If the rewrite fails, the original summary is published instead.
+`stocker-informer` is a long-running Go daemon that consumes protobuf stock summary signals from RabbitMQ, reads each stock's Markdown `summary.md` from Garage/S3, rewrites it as a Cora-9 news report with a configurable Ollama instance, and publishes the resulting Markdown to a GoToSocial instance. If the rewrite fails, the original summary is published instead.
 
 The producer (`stocker-summarizer`) writes the summary object and emits a minimal signal carrying only the stock's symbol and exchange. `stocker-informer` turns that signal into a published status — the Cora-9 report, or the original summary on fallback — with a configurable audience.
 
 ## Key features
 
-- Kafka consumer-group subscription to protobuf `stockstore.v1.Stock` signals, with partition offset tracking so a group resumes where it left off across restarts.
+- Durable RabbitMQ queue subscription to protobuf `stockstore.v1.Stock` signals: the consumer declares the durable input exchange, its own durable queue, and the binding on every (re)connect.
+- Manual acknowledgements (`autoAck=false`): every completed delivery is acked after its pipeline outcome, so a poison message or a permanently failing stock cannot stall the queue.
+- Automatic reconnect supervision with deterministic exponential backoff (`1s` doubling to `30s`); the process retries forever instead of exiting.
+- Competing consumer replicas share the same durable queue; `RABBITMQ_PREFETCH=1` keeps each replica to one in-flight message.
 - Summary reads from Garage/S3 use the canonical bucket-relative key `[S3_PATH_PREFIX/]{EXCHANGE}/{SYMBOL}/summary.md` only; a miss is one GET and returns `ErrNotFound`.
 - Each non-empty summary is rewritten as a Cora-9 news report via Ollama (`POST {OLLAMA_BASE_URL}/api/generate`) before publication; the persona, model, and sampling are configurable.
 - Any rewrite failure falls back to publishing the original summary, so an Ollama outage never stops or drops a publication.
@@ -26,8 +29,8 @@ The producer (`stocker-summarizer`) writes the summary object and emits a minima
 | --- | --- |
 | Language / Runtime | Go 1.25 |
 | Module | `github.com/example/stocker-informer` |
-| Key dependencies | `github.com/segmentio/kafka-go v0.4.51`; AWS SDK for Go v2 (`config`, `credentials`, `service/s3`); `git.wheeli.ca/brian/stocker-store/proto/v1`; `google.golang.org/protobuf v1.36.12`; the Ollama HTTP API via the standard library (no additional module) |
-| Configuration | 9 required environment variables + 14 optional |
+| Key dependencies | `github.com/rabbitmq/amqp091-go v1.16.0`; AWS SDK for Go v2 (`config`, `credentials`, `service/s3`); `git.wheeli.ca/brian/stocker-store/proto/v1`; `google.golang.org/protobuf v1.36.12`; the Ollama HTTP API via the standard library (no additional module) |
+| Configuration | 6 required environment variables + 21 optional |
 | Build / publish | `go build ./cmd/server/` / `./deploy/push.sh` (→ `podman build` + `podman push` to `git.wheeli.ca/brian/stocker-informer:latest`) |
 | Container base | `golang:1.25-bookworm` build → `gcr.io/distroless/static-debian12` runtime, user `nobody`/`65534` |
 | Registry image | `git.wheeli.ca/brian/stocker-informer:latest` |
@@ -45,10 +48,14 @@ cd stocker-informer
 
 go build -o stocker-informer ./cmd/server/
 
-# Kafka
-export KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-export KAFKA_TOPIC=stock.summary.available.v1
-export KAFKA_CONSUMER_GROUP=stocker-informer
+# RabbitMQ (all optional; defaults shown, except the placeholder credential)
+export RABBITMQ_URL=amqp://user:password@localhost:5672/
+export RABBITMQ_INPUT_EXCHANGE=stock.summary
+export RABBITMQ_INPUT_EXCHANGE_TYPE=topic
+export RABBITMQ_INPUT_ROUTING_KEY=stock.summary.available.v1
+export RABBITMQ_QUEUE=stocker-informer
+export RABBITMQ_PREFETCH=1
+export RABBITMQ_CONNECT_TIMEOUT_SECONDS=10
 
 # Garage / S3 (bucket already contains summaries)
 export S3_ENDPOINT=http://192.168.1.31:3900
@@ -75,7 +82,8 @@ The binary runs until stopped. Press `Ctrl-C` (`SIGINT`); it logs `shutting down
 ## Prerequisites
 
 - **Local build/run:** Go 1.25 or newer.
-- A reachable **Kafka** broker with a topic carrying protobuf `stockstore.v1.Stock` signals (operationally `stock.summary.available.v1`).
+- A reachable **RabbitMQ** broker (vhost `/` by default). The service declares the durable `stock.summary` exchange, its own durable `stocker-informer` queue, and the binding, so the broker user needs **configure**, **write**, and **read** permission on those objects.
+- A **producer** that publishes protobuf `stockstore.v1.Stock` bodies to the same exchange under the configured routing key (operationally `stock.summary` / `stock.summary.available.v1`, written by `stocker-summarizer`).
 - A reachable **Garage/S3** bucket that contains `summary.md` objects under the documented layout, plus static credentials with read access.
 - A reachable **GoToSocial** instance with a valid auth token.
 - A reachable **Ollama** instance (default `http://192.168.1.71:11434`) with the configured `OLLAMA_MODEL` already pulled (`ollama list`). If it is unreachable, the original summary is still published.
@@ -122,21 +130,25 @@ CGO is disabled, the runtime base is static distroless, and the container runs a
 
 ## Configuration
 
-The service is configured entirely by environment variables: nine are required and fourteen have defaults. `config.Load()` reads every variable, applies defaults, validates all of them, and returns a single aggregated error naming each offender. A failure aborts the process with exit code `1`, for example:
+The service is configured entirely by environment variables: six are required and twenty-one have defaults. `config.Load()` reads every variable, applies defaults, validates all of them, and returns a single aggregated error naming each offender. A failure aborts the process with exit code `1`, for example:
 
 ```
-{"level":"ERROR","msg":"fatal error","error":"load config: invalid configuration: KAFKA_TOPIC is required and must be non-empty; S3_BUCKET is required and must be non-empty"}
+{"level":"ERROR","msg":"fatal error","error":"load config: invalid configuration: S3_BUCKET is required and must be non-empty; RABBITMQ_INPUT_EXCHANGE must be non-empty"}
 ```
 
-Secret values (`GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) are never included in errors or logs.
+Secret values (`GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) are never included in errors or logs. `RABBITMQ_URL` is also treated as secret-bearing — it usually embeds broker credentials — and is only ever logged in redacted form (`scheme://host[:port]/vhost`).
 
 ## Environment Variables
 
 | Variable | Required / default | Secret | Meaning |
 | --- | --- | --- | --- |
-| `KAFKA_BOOTSTRAP_SERVERS` | **Required** | no | Comma-separated broker addresses, e.g. `localhost:9092` or `broker1:9092,broker2:9092`. Split on `,`, trimmed, empty entries dropped; at least one non-empty broker is required. Each entry must be `host:port` (bracketed IPv6 like `[::1]:9092` allowed), otherwise startup fails with `load config: invalid configuration: ...` and exit code `1`. |
-| `KAFKA_TOPIC` | **Required** | no | Topic carrying protobuf `stockstore.v1.Stock` signals. Operationally `stock.summary.available.v1`. |
-| `KAFKA_CONSUMER_GROUP` | **Required** | no | Consumer-group ID used for partition offset tracking. |
+| `RABBITMQ_URL` | optional, default `amqp://<user>:<password>@192.168.1.48:5672/` (credentials redacted here; the built-in default embeds real shared-broker credentials) | **yes** (usually embeds credentials) | AMQP broker URL passed verbatim to `amqp.DialConfig`. Trimmed; absent or blank uses the built-in shared-test-broker default. Must be an absolute `amqp://` or `amqps://` URI with a non-empty host; a port, if present, must be numeric `1`–`65535`. Never included in errors or logs; logs show only the redacted `scheme://host[:port]/vhost`. |
+| `RABBITMQ_INPUT_EXCHANGE` | optional, default `stock.summary` | no | Exchange the consumer declares and binds the queue to. When the variable is **present**, the trimmed value must be non-empty and at most 255 bytes; an explicitly blank value is an error, not a fallback to the default. |
+| `RABBITMQ_INPUT_EXCHANGE_TYPE` | optional, default `topic` | no | `direct` \| `topic` \| `fanout` \| `headers` (trimmed, lower-cased). Blank — present or absent — selects `topic`. |
+| `RABBITMQ_INPUT_ROUTING_KEY` | optional, default `stock.summary.available.v1` | no | Binding key from the exchange to the queue, and the key the producer must publish under. Same present/non-blank/255-byte rule as the exchange. |
+| `RABBITMQ_QUEUE` | optional, default `stocker-informer` | no | Durable, non-exclusive, non-auto-delete queue the consumer declares and consumes. Same present/non-blank/255-byte rule as the exchange. |
+| `RABBITMQ_PREFETCH` | optional, default `1` | no | Per-consumer QoS prefetch count (`Qos(prefetch, 0, false)`). Absent or blank uses the default; otherwise an integer in `[1, 65535]` (the AMQP prefetch field is 16 bits). |
+| `RABBITMQ_CONNECT_TIMEOUT_SECONDS` | optional, default `10` | no | Connect timeout in seconds for each attempt: it bounds the TCP dial and — through a connection deadline — the AMQP/TLS handshake, so a broker that accepts TCP but stalls cannot hang a connect. Absent or blank uses the default; otherwise an integer in `[1, 300]`. |
 | `GOTOSOCIAL_INSTANCE` | **Required** | no | Absolute `http(s)` base URL of the instance (scheme + host), e.g. `https://wheeli.social`. The publisher POSTs to `{GOTOSOCIAL_INSTANCE}/api/v1/statuses`. |
 | `GOTOSOCIAL_USER` | **Required** | no | Account name. Stored and logged only as metadata; the publish request authenticates with the Bearer token. |
 | `GOTOSOCIAL_TOKEN` | **Required** | **yes** | Bearer token for `/api/v1/statuses`, sent as `Authorization: Bearer <token>`. Never logged. |
@@ -152,7 +164,7 @@ Secret values (`GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) are never i
 | `OLLAMA_ENABLED` | optional, default `true` | no | Go boolean (`true`/`false`/`1`/`0`). When false, no Ollama call is made and the original summary is published. |
 | `OLLAMA_BASE_URL` | optional, default `http://192.168.1.71:11434` | no | Ollama server root. Must be an absolute `http(s)` URL with scheme and host. A trailing `/` is trimmed and `/api/generate` is appended; do not include `/api`. |
 | `OLLAMA_MODEL` | optional, default `gemma4:26b` | no | Model name passed to Ollama; must be non-empty and already pulled on the Ollama host. |
-| `OLLAMA_TIMEOUT_SECONDS` | optional, default `120` | no | Per-rewrite HTTP timeout in seconds. Must parse as an integer in `[1, 3600]`; covers connect, request, generation, and response read. The upper bound guards against a duration overflow disabling the timeout (see plan D11). |
+| `OLLAMA_TIMEOUT_SECONDS` | optional, default `120` | no | Per-rewrite HTTP timeout in seconds. Must parse as an integer in `[1, 3600]`; covers connect, request, generation, and response read. The upper bound guards against a duration overflow disabling the timeout. |
 | `OLLAMA_SYSTEM_PROMPT` | optional, default built-in Cora-9 prompt | no | Replaces the persona/system instruction. Leading and trailing whitespace is trimmed; blank means the built-in prompt. |
 | `OLLAMA_TEMPERATURE` | optional, default `0.7` | no | Sampling temperature. Must be a finite number in `[0, 2]`; `0` is allowed. |
 | `OLLAMA_MAX_TOKENS` | optional, default `1024` | no | Value sent as Ollama `options.num_predict`. Must parse as an integer and be `> 0`. |
@@ -160,8 +172,13 @@ Secret values (`GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) are never i
 
 ### Validation notes
 
-- All nine required variables are checked together; every empty one is named in the aggregated error rather than only the first.
+- Exactly six variables are required: `GOTOSOCIAL_INSTANCE`, `GOTOSOCIAL_USER`, `GOTOSOCIAL_TOKEN`, `S3_BUCKET`, `S3_ACCESS_KEY`, and `S3_SECRET_KEY`. Every RabbitMQ setting has a working default, so the service can start without any `RABBITMQ_*` variable.
+- All required variables are checked together; every empty one is named in the aggregated error rather than only the first.
 - `GOTOSOCIAL_INSTANCE`, `S3_ENDPOINT`, and `OLLAMA_BASE_URL` must parse as absolute URLs with an `http`/`https` scheme and a host.
+- `RABBITMQ_URL` must parse as an absolute `amqp://` or `amqps://` URI with a host and a numeric port in `1`–`65535` when one is given. A malformed value is reported without echoing it, so embedded credentials cannot leak.
+- `RABBITMQ_INPUT_EXCHANGE`, `RABBITMQ_INPUT_ROUTING_KEY`, and `RABBITMQ_QUEUE` use a present/absent rule: absent uses the default, but present-and-blank is rejected as non-empty-required, and values longer than 255 bytes are rejected.
+- `RABBITMQ_INPUT_EXCHANGE_TYPE` is trimmed and lower-cased; anything outside `direct|topic|fanout|headers` is rejected. Blank selects `topic`.
+- `RABBITMQ_PREFETCH` must be an integer in `[1, 65535]`; `RABBITMQ_CONNECT_TIMEOUT_SECONDS` must be an integer in `[1, 300]`. Blank values use their defaults.
 - `GOTOSOCIAL_AUDIENCE` is trimmed and lower-cased; anything outside `global|local|direct` is rejected.
 - `S3_TIMEOUT_SECONDS` values that are non-integers or `<= 0` are rejected.
 - `OLLAMA_ENABLED` must parse as a Go boolean; invalid values are rejected.
@@ -178,16 +195,16 @@ A placeholder-only template ships at `deploy/quadlet/.env.podman.example`. Copy 
 mkdir -p ~/.config/stocker-informer
 cp deploy/quadlet/.env.podman.example ~/.config/stocker-informer/.env.podman
 chmod 600 ~/.config/stocker-informer/.env.podman
-# then edit in the real Kafka brokers, S3 bucket and keys, and GoToSocial token
+# then edit in the real RabbitMQ, S3, Ollama, and GoToSocial values
 ```
 
 The env file itself is **not** shipped — the operator owns it and it must never be committed with real credentials (`.gitignore` ignores `.env` / `.env.*`, while `*.example` files stay trackable).
 
-## Kafka input schema
+## Message input schema
 
-### Record value
+### Message body
 
-Each record value is a protobuf-encoded `stockstore.v1.Stock`, imported from `git.wheeli.ca/brian/stocker-store/proto/v1`. The relevant schema:
+Each delivery body is a protobuf-encoded `stockstore.v1.Stock`, imported from `git.wheeli.ca/brian/stocker-store/proto/v1`. The relevant schema:
 
 ```proto
 message Stock {
@@ -204,16 +221,17 @@ message ScoreEntry {
 ```
 
 - Only `symbol` and `exchange` are used. Both are trimmed and must be non-empty; the exchange is required because it forms the S3 path.
-- `scores`, the record key, and record headers are ignored.
+- `scores` and the AMQP message properties/headers are ignored.
 
-### Producer and topic
+### Producer, exchange, and routing key
 
 - Producer: `stocker-summarizer`.
-- Topic (operational): `stock.summary.available.v1`, configured through `KAFKA_TOPIC`.
+- Exchange: `stock.summary`, declared durable with type `topic` (configurable through `RABBITMQ_INPUT_EXCHANGE` / `RABBITMQ_INPUT_EXCHANGE_TYPE`).
+- Routing key: `stock.summary.available.v1`, configured through `RABBITMQ_INPUT_ROUTING_KEY`.
 
 ### Decode behaviour
 
-- A value that is not valid protobuf, or that trims to an empty `symbol` or `exchange`, is logged as an `Error` (`decode stock failed`) and the offset is committed so the message is skipped rather than redelivered.
+- A body that is not valid protobuf, or that trims to an empty `symbol` or `exchange`, is logged as an `Error` (`decode stock failed`) and the delivery is **acked**, so the message is skipped rather than redelivered.
 - The summary body is never logged.
 
 ## Summary source
@@ -263,7 +281,7 @@ With `GOTOSOCIAL_AUDIENCE=global` and rewriting disabled (or on fallback), the r
 
 ## Cora-9 rewrite (Ollama)
 
-After a non-empty summary is read and trimmed, and before it is published, the consumer asks a configurable Ollama instance to rewrite it as a news report in the voice of **Cora-9** — a cheerful, friendly, intelligent, and demure robot woman who is a financial expert and news reporter. Missing, empty, and unreadable summaries never reach Ollama; rewriting is skipped and the existing skip/commit behavior applies.
+After a non-empty summary is read and trimmed, and before it is published, the consumer asks a configurable Ollama instance to rewrite it as a news report in the voice of **Cora-9** — a cheerful, friendly, intelligent, and demure robot woman who is a financial expert and news reporter. Missing, empty, and unreadable summaries never reach Ollama; rewriting is skipped and the existing skip/ack behavior applies.
 
 ### Request shape
 
@@ -290,7 +308,7 @@ The built-in persona preserves facts, figures, dates, and caveats, forbids inven
 
 ### Failure semantics
 
-Any rewrite failure logs a warning and publishes the original summary. The offset is committed exactly once, as before; rewriting never skips a publication and never changes offset semantics.
+Any rewrite failure logs a warning and publishes the original summary. The delivery is acked exactly once, as for every other completed outcome; rewriting never skips a publication and never changes ack semantics.
 
 | Condition | Published text | Log |
 | --- | --- | --- |
@@ -314,7 +332,7 @@ Any rewrite failure logs a warning and publishes the original summary. The offse
 
 ### Privacy
 
-The summary is sent over plain HTTP to `OLLAMA_BASE_URL`, so the host must be on a trusted network. No credentials are sent. The summary, the prompt, and the rewritten report are never logged; only lengths, identity fields, offsets, and error text are logged.
+The summary is sent over plain HTTP to `OLLAMA_BASE_URL`, so the host must be on a trusted network. No credentials are sent. The summary, the prompt, and the rewritten report are never logged; only lengths, identity fields, delivery metadata, and error text are logged.
 
 ### Operational rollback
 
@@ -366,7 +384,7 @@ Export the environment variables, then run the built binary. It emits structured
 {"level":"INFO","msg":"starting stocker-informer","version":"dev","commit":"none","build_time":"unknown"}
 ```
 
-It then logs `configuration loaded` (with `kafka_topic`, `s3_endpoint`, `s3_bucket`, `audience`, `ollama_enabled`, `ollama_base_url`, and `ollama_model`) and `kafka consumer started`. It runs until `SIGINT` / `SIGTERM`, then logs `shutting down` and exits with code `0`.
+It then logs `configuration loaded` (with `rabbitmq_broker` — the redacted URL — `rabbitmq_exchange`, `rabbitmq_exchange_type`, `rabbitmq_routing_key`, `rabbitmq_queue`, `rabbitmq_prefetch`, `s3_endpoint`, `s3_bucket`, `audience`, `ollama_enabled`, `ollama_base_url`, and `ollama_model`) and `rabbitmq consumer started`. It runs until `SIGINT` / `SIGTERM`, then logs `shutting down` and exits with code `0`.
 
 ### Container
 
@@ -400,7 +418,7 @@ There is **no** separate build unit and **no** root install script: the image is
 Setup (rootless, no sudo; the env file is **not** shipped — you create it):
 
 ```bash
-# 1. Author the config (fill in Kafka, S3, and GoToSocial values before starting)
+# 1. Author the config (fill in RabbitMQ, S3, and GoToSocial values before starting)
 mkdir -p ~/.config/stocker-informer
 cp deploy/quadlet/.env.podman.example ~/.config/stocker-informer/.env.podman
 chmod 600 ~/.config/stocker-informer/.env.podman
@@ -439,7 +457,7 @@ It requires an existing `podman login` to `git.wheeli.ca` beforehand. The pushed
 The shortest path to a running, rootless service:
 
 1. **Write the env file** (the file is not shipped — you author it):
-   `mkdir -p ~/.config/stocker-informer` and create `~/.config/stocker-informer/.env.podman` from `deploy/quadlet/.env.podman.example` (see **Environment Variables**); fill in the Kafka, S3, and GoToSocial values. The `OLLAMA_*` defaults work as shipped; adjust them only if the Ollama host or model differs.
+   `mkdir -p ~/.config/stocker-informer` and create `~/.config/stocker-informer/.env.podman` from `deploy/quadlet/.env.podman.example` (see **Environment Variables**); fill in the RabbitMQ, S3, and GoToSocial values. The `OLLAMA_*` defaults work as shipped; adjust them only if the Ollama host or model differs.
 
 2. **Build + push the image** to the registry (no root):
    `./deploy/push.sh`
@@ -457,22 +475,28 @@ The shortest path to a running, rootless service:
 - `log/slog` JSON handler writing to stdout.
 - Levels emitted: `Debug` / `Info` / `Warn` / `Error` (the default handler drops `Debug`).
 - No log-level flag.
+- `amqp091-go` takes no application logger, so there is no client/trace log stream; all broker observability comes from the consumer's and probe's own structured lines.
 - `GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, the summary body, the rewritten report, and the Ollama system prompt are never logged.
-- kafka-go client/trace output is emitted at `Debug` as `kafka client` (dropped by the default `Info` handler); kafka-go errors are emitted at `Warn` as `kafka client error` with a `detail` attribute.
-- `GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, and the summary body are never logged.
+- Message bodies and the raw broker URL are never logged; `RABBITMQ_URL` appears only as a redacted `scheme://host[:port]/vhost`.
+- `amqp091-go` does **not** reconnect automatically: the consumer supervises each session restart itself (see **RabbitMQ consumer behaviour**).
+- Every delivery is acked after its pipeline outcome; a delivery interrupted by shutdown is requeued with a nack instead.
 - No log rotation configured (stdout / journald, operator-owned).
 
-Representative log lines: `starting stocker-informer`, `configuration loaded`, `kafka consumer started`, `decode stock failed`, `summary not found`, `read summary failed`, `summary is empty, skipping publish`, `rewrite failed, publishing original summary`, `rewrite returned empty output, publishing original summary`, `publish failed`, `summary published on GoToSocial`, `exceeded max consecutive Kafka read failures`, `abandoning commit after max retries`, `shutting down`. The success line carries `rewritten=true|false`, plus `summary_chars` and `report_chars` when rewritten.
-Representative log lines: `starting stocker-informer`, `configuration loaded`, `kafka consumer started`, `kafka connectivity probe started`, `kafka connectivity verified`, `kafka connectivity probe failed`, `kafka topic not available`, `kafka connectivity lost`, `kafka connectivity restored`, `kafka client error`, `decode stock failed`, `summary not found`, `read summary failed`, `summary is empty, skipping publish`, `publish failed`, `summary published on GoToSocial`, `exceeded max consecutive Kafka read failures`, `abandoning commit after max retries`, `shutting down`.
+Representative log lines: `starting stocker-informer`, `configuration loaded`, `rabbitmq consumer started`, `rabbitmq consumer connected`, `rabbitmq connectivity probe started`, `rabbitmq connectivity verified`, `rabbitmq connectivity probe failed`, `rabbitmq connectivity lost`, `rabbitmq connectivity restored`, `rabbitmq connect failed, backing off`, `rabbitmq consumer connection lost`, `rabbitmq consumer reconnected`, `decode stock failed`, `summary not found`, `read summary failed`, `summary is empty, skipping publish`, `rewrite failed, publishing original summary`, `rewrite returned empty output, publishing original summary`, `publish failed`, `summary published on GoToSocial`, `ack delivery failed`, `shutting down`. The success line carries `symbol`, `exchange`, `routing_key`, `delivery_tag`, `redelivered`, and `rewritten=true|false`, plus `summary_chars` and `report_chars` when rewritten.
 
-### Kafka consumer behaviour
+### RabbitMQ consumer behaviour
 
-- Consumer `GroupID=<KAFKA_CONSUMER_GROUP>`, topic `<KAFKA_TOPIC>`.
-- `StartOffset=kafka.FirstOffset` — a fresh group starts at the beginning of the log.
-- `MaxBytes=10_000_000`, `ReadBatchTimeout=5s`.
-- Each record value is decoded as protobuf `stockstore.v1.Stock`, the summary is read from S3, rewritten as a Cora-9 report when enabled (falling back to the original on any rewrite error), and the resulting text is published.
-- On a `ReadMessage` error: exponential backoff starting at `500 ms`, doubling, capped at `30 s`; if `10` or more consecutive read failures occur it logs an `Error` (`exceeded max consecutive Kafka read failures`) but keeps retrying. A successful read resets the consecutive error count and backoff.
-- Coordinator/join errors (e.g. `kafka client error` with `detail` containing `[15] Group Coordinator Not Available`) are expected during a broker restart: they are logged as `Warn` and retried automatically with no operator action. See [docs/deployment.md#troubleshooting-kafka-connectivity](docs/deployment.md#troubleshooting-kafka-connectivity).
+- Topology, declared on every (re)connect:
+  - Exchange `RABBITMQ_INPUT_EXCHANGE` (default `stock.summary`) with type `RABBITMQ_INPUT_EXCHANGE_TYPE` (default `topic`), `durable=true`, `autoDelete=false`, `internal=false`.
+  - Queue `RABBITMQ_QUEUE` (default `stocker-informer`), `durable=true`, `autoDelete=false`, `exclusive=false`.
+  - Binding queue ← `RABBITMQ_INPUT_ROUTING_KEY` (default `stock.summary.available.v1`) → exchange.
+- `Qos(RABBITMQ_PREFETCH, 0, false)` — per consumer, not global; the default `1` keeps one in-flight message per replica.
+- `Consume(queue, "stocker-informer-<pid>", autoAck=false, exclusive=false, noLocal=false, noWait=false, nil)`: acknowledgement is manual.
+- Each body is decoded as protobuf `stockstore.v1.Stock`, the summary is read from S3, rewritten as a Cora-9 report when enabled (falling back to the original on any rewrite error), and the resulting text is published.
+- `amqp091-go` does **not** reconnect automatically. The consumer supervises dial → channel → topology → QoS → consume and retries forever with deterministic exponential backoff: `1s`, `2s`, `4s`, … capped at `30s`. A session that delivered at least one message resets the failure counter, so a long healthy connection reconnects after `1s`.
+- A connect failure logs `rabbitmq connect failed, backing off` (the first failure and every tenth at `Warn`, the rest at `Debug`) and never crashes the process. A lost session logs `rabbitmq consumer connection lost`; the first connection logs `rabbitmq consumer connected` and later ones `rabbitmq consumer reconnected`.
+- Competing consumers may share the durable queue: several replicas consume from `stocker-informer` without losing messages, and `RABBITMQ_PREFETCH=1` plus the synchronous pipeline bounds each replica to one in-flight delivery.
+- Declaration mismatches are configuration errors that require operator action: a `406 PRECONDITION_FAILED` means the existing exchange or queue has different type/durability/flags/arguments than configured, so the consumer retries with backoff but cannot fix it itself. A `403 ACCESS_REFUSED` means the broker user lacks permission on the vhost. See [docs/deployment.md#troubleshooting-rabbitmq-connectivity](docs/deployment.md#troubleshooting-rabbitmq-connectivity).
 
 ### GoToSocial publisher behaviour
 
@@ -481,28 +505,34 @@ Representative log lines: `starting stocker-informer`, `configuration loaded`, `
 - Form body: `status`, `visibility`, `local_only`, and `content_type=text/markdown` per the **Audience configuration** table.
 - Up to `3` attempts with exponential backoff (500 ms doubling per attempt, capped at 30 s); `20 s` request timeout; the response body is drained on non-2xx.
 
-### Offset & failure semantics
+### Ack & failure semantics
 
-Offsets are committed after every message, in every outcome:
+Every completed pipeline outcome acks the delivery:
 
-| Outcome | Log level | Offset |
+| Outcome | Log level | Settlement |
 | --- | --- | --- |
-| Decode failure | `Error` (`decode stock failed`) | committed |
-| Summary not found | `Warn` (`summary not found`) | committed |
-| S3 storage error (non-not-found) | `Error` (`read summary failed`) | committed |
-| Summary trims to empty | `Warn` (`summary is empty, skipping publish`) | committed |
-| Rewrite failure (or blank output) | `Warn` (`rewrite failed, publishing original summary`) | committed; original summary published |
-| Publish failure after 3 attempts | `Error` (`publish failed`) | committed |
-| Publish success | `Info` (`summary published on GoToSocial`, with `symbol`, `exchange`, `offset`, `rewritten`) | committed |
+| Decode failure | `Error` (`decode stock failed`) | acked |
+| Summary not found | `Warn` (`summary not found`) | acked |
+| S3 storage error (non-not-found) | `Error` (`read summary failed`) | acked |
+| Summary trims to empty | `Warn` (`summary is empty, skipping publish`) | acked |
+| Rewrite failure (or blank output) | `Warn` (`rewrite failed, publishing original summary` / `rewrite returned empty output, publishing original summary`) | acked; original summary published |
+| Publish failure after 3 attempts | `Error` (`publish failed`) | acked |
+| Publish success | `Info` (`summary published on GoToSocial`, with `symbol`, `exchange`, `routing_key`, `delivery_tag`, `redelivered`, `rewritten`) | acked |
+| Shutdown during a delivery | `Info` (`shutting down`) | nacked with requeue, not acked |
 
-- A rewrite failure never skips the publish: the original summary is published and the message is committed exactly once.
-- A **failed** GoToSocial publish is committed and dropped; only the publisher's 3 total attempts apply, and a failed publish is **not** redelivered by the consumer.
-- Offset commit (`commitWithRetries`) attempts up to `3` times (`100 ms` between tries); if all fail it logs `abandoning commit after max retries` and continues.
+- A rewrite failure never skips the publish: the original summary is published and the delivery is acked exactly once.
+- A **failed** GoToSocial publish is acked and dropped; only the publisher's 3 total attempts apply, and a failed publish is **not** redelivered by the consumer.
+- Because the ack happens after publication, publication is **at-most-once after the ack**. If a session dies after GoToSocial accepted a status but before the ack lands, the broker requeues the unacked delivery and the stock can be published again: **at-least-once delivery with possible duplicates**. There is no idempotency key, and no exactly-once guarantee is claimed.
+- A delivery interrupted by shutdown is not a completed outcome, so it is nacked with `requeue=true` instead of acked (requeued by the broker if the channel is already dead).
+- An ack failure is logged as `ack delivery failed` and never retried: AMQP delivery tags are channel-scoped, so a tag from a dead channel is meaningless on a replacement one.
 
 ### Health endpoint
 
 - `GET /health` on `:8080`.
-- Returns `503` with body `{"status":"starting","version":"..."}` until the first successful Kafka connectivity probe for `KAFKA_TOPIC`, then `200` with `{"status":"ok","version":"..."}`. Readiness is sticky thereafter: a later loss of Kafka connectivity logs `kafka connectivity lost` but does **not** flip the endpoint back to `503` (by design, to avoid restart loops — watch the logs).
+- A dedicated probe (its own connection, never the consumer's) opens a short-lived session, passively declares the configured exchange (checking its type and durability) and queue (checking `durable=true`, non-exclusive), then closes both. Passive declares create, bind, consume, and publish nothing.
+- Each attempt is bounded by a `5s` timeout; retries back off `1s` doubling to `30s`, and a ready probe re-checks every `60s`.
+- Returns `503` with body `{"status":"starting","version":"..."}` until the first successful verification, then `200` with `{"status":"ok","version":"..."}`. Readiness is sticky thereafter: a later loss logs `rabbitmq connectivity lost` and a recovery logs `rabbitmq connectivity restored`, but the endpoint does **not** flip back to `503` (by design, to avoid restart loops — watch the logs).
+- Expected startup noise: `rabbitmq connectivity probe failed` with `NOT_FOUND` (404) until the consumer has declared the topology, and `PRECONDITION_FAILED` (406) when an existing object has different flags.
 
 Caveats:
 
@@ -511,24 +541,20 @@ Caveats:
 ### Signals & shutdown
 
 - Honors context cancellation on `SIGINT` / `SIGTERM`.
-- Closes the Kafka reader and returns on shutdown.
+- On shutdown the consumer cancels its consumer tag, requeues already-prefetched deliveries with `Nack(..., requeue=true)`, closes the channel and the connection, logs `rabbitmq consumer shutting down`, and returns `nil`.
+- A cancellation that lands during a backoff sleep logs `rabbitmq consumer shutting down during backoff` and also returns `nil`.
+- A delivery in flight when shutdown begins is not acked: it is nacked with requeue (or requeued by the broker if the channel is already gone), so the stock is not lost.
 - A health HTTP server `ListenAndServe` failure (e.g. `:8080` already in use) is logged as a `Warn` (`health check server error`) but does **not** stop the consumer.
 
 ### How to verify it's working
 
-1. `podman logs stocker-informer` (or the process stdout) shows `starting stocker-informer` then `configuration loaded` then `kafka consumer started`.
-2. Write a `NASDAQ/AAPL/summary.md` to the bucket and produce a protobuf `Stock{symbol:"AAPL",exchange:"NASDAQ"}` on `KAFKA_TOPIC`; the log shows `summary published on GoToSocial` with `rewritten=true`, and the status reads as a Cora-9 news report.
+1. `podman logs stocker-informer` (or the process stdout) shows `starting stocker-informer` then `configuration loaded` then `rabbitmq consumer started`. `/health` stays `503` (`{"status":"starting"}`) until the probe successfully passive-declares the exchange and queue; `rabbitmq connectivity verified` appears in the log immediately before readiness flips to `200` (`{"status":"ok"}`).
+2. Write a `NASDAQ/AAPL/summary.md` to the bucket, then publish one protobuf `Stock{symbol:"AAPL",exchange:"NASDAQ"}` body to the `stock.summary` exchange with routing key `stock.summary.available.v1` (management UI, `rabbitmqadmin publish`, or a small Go producer). The log shows `summary published on GoToSocial` with `rewritten=true`, and the status reads as a Cora-9 news report.
 3. Rewrite fallback check: stop Ollama (or point `OLLAMA_BASE_URL` at an unused port); the same signal logs `rewrite failed, publishing original summary`, the original summary appears, and the success line shows `rewritten=false`. Set `OLLAMA_ENABLED=false` to confirm the same publish without a warning.
 4. Confirm the status appears on the GoToSocial instance according to the configured audience.
-5. Quick negative test: run the binary with one env var deliberately left empty — it should fail fast with a `load config: invalid configuration: ...` JSON fatal-error line and exit `1`.
-6. S3 path check: with a missing summary, the log shows `summary not found` and the consumer continues (offset committed).
-7. Restart check: stop/start and confirm the consumer resumes at the last committed offset for the same `KAFKA_CONSUMER_GROUP`.
-1. `podman logs stocker-informer` (or the process stdout) shows `starting stocker-informer` then `configuration loaded` then `kafka consumer started`. `/health` stays `503` (`{"status":"starting"}`) until the connectivity probe verifies metadata for `KAFKA_TOPIC`; `kafka connectivity verified` appears in the log immediately before readiness flips to `200` (`{"status":"ok"}`).
-2. Write a `NASDAQ/AAPL/summary.md` to the bucket and produce a protobuf `Stock{symbol:"AAPL",exchange:"NASDAQ"}` on `KAFKA_TOPIC`; the log shows `summary published on GoToSocial`.
-3. Confirm the status appears on the GoToSocial instance according to the configured audience.
-4. Quick negative test: run the binary with one env var deliberately left empty — it should fail fast with a `load config: invalid configuration: ...` JSON fatal-error line and exit `1`.
-5. S3 path check: with a missing summary, the log shows `summary not found` and the consumer continues (offset committed).
-6. Restart check: stop/start and confirm the consumer resumes at the last committed offset for the same `KAFKA_CONSUMER_GROUP`.
+5. Quick negative test: run the binary with one required env var deliberately left empty — it should fail fast with a `load config: invalid configuration: ...` JSON fatal-error line and exit `1`.
+6. S3 path check: with a missing summary, the log shows `summary not found` and the consumer continues (delivery acked).
+7. Restart check: stop and start the service. The durable `stocker-informer` queue retains messages published while it was down, and any unacked deliveries from the previous run are redelivered (flagged `redelivered=true`), so expect a possible duplicate publication.
 
 ## Repository structure
 
@@ -537,17 +563,16 @@ stocker-informer/
 ├── .gitignore
 ├── AGENTS.md
 ├── Containerfile
-├── review.md
 ├── go.mod
 ├── go.sum
 ├── README.md
 ├── docs/
-│   ├── deployment.md
-│   ├── plan-ollama-cora9-rewrite.md
-│   └── stock-summary-gotosocial.md
+│   └── deployment.md
 ├── cmd/server/main.go
 ├── internal/config/config.go
-├── internal/kafka/consumer.go
+├── internal/rabbitmq/consumer.go
+├── internal/rabbitmq/session.go
+├── internal/rabbitmq/probe.go
 ├── internal/messenger/messenger.go
 ├── internal/messenger/gotosocial_publisher.go
 ├── internal/rewriter/ollama.go
@@ -569,9 +594,15 @@ go vet ./...
 go test ./... -count=1
 ```
 
-- Unit tests are offline: S3 uses an injected fake API, and GoToSocial and Ollama use `httptest`.
+- Unit tests are offline: S3 uses an injected fake API, GoToSocial and Ollama use `httptest`, and the consumer/probe tests inject fake AMQP connections, channels, dialers, and sleep functions.
+- The opt-in RabbitMQ live test runs only when `RABBITMQ_LIVE_TEST=1`. It connects to the broker in `RABBITMQ_URL` (falling back to the built-in default), declares uniquely named exchange/queue/routing-key topology, publishes one protobuf `Stock`, and asserts exactly one publication; it deletes its objects afterwards and is skipped by the default suite.
+
+  ```bash
+  RABBITMQ_LIVE_TEST=1 go test ./internal/rabbitmq -run TestLiveConsumer -v
+  ```
+
 - The opt-in GoToSocial live test runs only when `GOTOSOCIAL_LIVE_TEST=1` and requires `GOTOSOCIAL_INSTANCE`, `GOTOSOCIAL_USER`, `GOTOSOCIAL_TOKEN`, and `GOTOSOCIAL_RECIPIENT`.
-- The opt-in Ollama live test is gated by `OLLAMA_LIVE_TEST=1`, defaults to `http://192.168.1.71:11434` and `gemma4:26b`, and honours `OLLAMA_BASE_URL` / `OLLAMA_MODEL` when set (see `docs/plan-ollama-cora9-rewrite.md` §7.2):
+- The opt-in Ollama live test is gated by `OLLAMA_LIVE_TEST=1`, defaults to `http://192.168.1.71:11434` and `gemma4:26b`, and honours `OLLAMA_BASE_URL` / `OLLAMA_MODEL` when set:
 
   ```bash
   OLLAMA_LIVE_TEST=1 go test ./internal/rewriter -run TestOllamaLive -v
@@ -580,8 +611,11 @@ go test ./... -count=1
 ## Known limitations
 
 - The Go module path is a placeholder (`github.com/example/stocker-informer`), not the canonical repo identity.
-- The `/health` readiness flag is sticky: it stays `200` once the first successful Kafka probe has run and never flips back, so a cluster that dies after startup keeps `/health` at `200` — only the logs (`kafka connectivity lost`) show the loss. This is by design, to avoid restart loops. `:8080` is also not published to the host by the quadlet unit as deployed.
-- A failed GoToSocial publish is committed and dropped (not redelivered) after the publisher's 3 total attempts.
+- The `/health` readiness flag is sticky: it stays `200` once the first successful RabbitMQ probe has run and never flips back, so a broker that dies after startup keeps `/health` at `200` — only the logs (`rabbitmq connectivity lost`) show the loss. This is by design, to avoid restart loops. `:8080` is also not published to the host by the quadlet unit as deployed.
+- Publication is at-most-once after the ack: if the connection drops after GoToSocial accepted a status but before the ack lands, the broker requeues the delivery and the stock can be published a second time. There is no idempotency key and no exactly-once guarantee.
+- `RABBITMQ_PREFETCH=1` plus a single synchronous worker means a downstream outage (S3, Ollama, or GoToSocial) lets a backlog accumulate in the durable queue until it recovers.
+- A `406 PRECONDITION_FAILED` declaration mismatch (an existing exchange or queue with different type, durability, or flags) is fatal to the session until an operator corrects the configuration or deletes the service-owned object.
+- A failed GoToSocial publish is acked and dropped (not redelivered) after the publisher's 3 total attempts.
 - `GOTOSOCIAL_USER` is required by config validation but is not currently referenced by the publish request (authentication is Bearer-token based).
 - No log rotation is configured (JSON logging → stdout/journald, operator-owned).
 - Rewriting adds up to `OLLAMA_TIMEOUT_SECONDS` latency per message; the consumer processes messages serially.
@@ -590,7 +624,7 @@ go test ./... -count=1
 - The summary is sent to Ollama over plain HTTP; the Ollama host must be trusted.
 - No chunking or threading: a summary or report larger than the instance's status limit fails validation at GoToSocial, is retried 3 times, and is then dropped.
 - Prompt-injection mitigations (persona rules plus `<summary>` delimiters) are best-effort, not a guarantee.
-- S3 storage errors are not retried; the message is logged, the offset is committed, and the summary is skipped.
+- S3 storage errors are not retried; the message is logged, the delivery is acked, and the summary is skipped.
 - Summary reads issue a single GET at the canonical key, so a missing summary costs one S3 round trip.
 - The container build needs network and git access to `git.wheeli.ca` to resolve the private `stocker-store` module; no credentials are baked into the image.
 - The operator-authored `~/.config/stocker-informer/.env.podman` is not shipped in this repo; `deploy/quadlet/.env.podman.example` contains placeholders only and must be edited for real deployments.

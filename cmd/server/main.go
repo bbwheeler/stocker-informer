@@ -11,8 +11,8 @@ import (
 	"syscall"
 
 	"github.com/example/stocker-informer/internal/config"
-	"github.com/example/stocker-informer/internal/kafka"
 	"github.com/example/stocker-informer/internal/messenger"
+	"github.com/example/stocker-informer/internal/rabbitmq"
 	"github.com/example/stocker-informer/internal/rewriter"
 	"github.com/example/stocker-informer/internal/summarystore"
 )
@@ -44,7 +44,12 @@ func run(log *slog.Logger) error {
 	defer stop()
 
 	log.Info("configuration loaded",
-		"kafka_topic", cfg.KafkaTopic,
+		"rabbitmq_broker", config.RedactedAMQPURL(cfg.RabbitMQ.URL),
+		"rabbitmq_exchange", cfg.RabbitMQ.InputExchange,
+		"rabbitmq_exchange_type", cfg.RabbitMQ.InputExchangeType,
+		"rabbitmq_routing_key", cfg.RabbitMQ.InputRoutingKey,
+		"rabbitmq_queue", cfg.RabbitMQ.Queue,
+		"rabbitmq_prefetch", cfg.RabbitMQ.Prefetch,
 		"s3_endpoint", cfg.S3.Endpoint,
 		"s3_bucket", cfg.S3.Bucket,
 		"audience", cfg.GotoSocialAudience,
@@ -73,10 +78,8 @@ func run(log *slog.Logger) error {
 		summaryRewriter = rewriter.New(cfg.Ollama)
 	}
 
-	consumer := kafka.New(
-		cfg.KafkaServers(),
-		cfg.KafkaTopic,
-		cfg.KafkaConsumerGroup,
+	consumer := rabbitmq.New(
+		cfg.RabbitMQ,
 		store,
 		summaryRewriter,
 		publisher,
@@ -85,8 +88,12 @@ func run(log *slog.Logger) error {
 
 	ready := new(atomic.Bool)
 
-	probe := kafka.NewProbe(cfg.KafkaServers(), cfg.KafkaTopic, log)
-	log.Info("kafka connectivity probe started", "brokers", cfg.KafkaServers(), "topic", cfg.KafkaTopic)
+	probe := rabbitmq.NewProbe(cfg.RabbitMQ, log)
+	log.Info("rabbitmq connectivity probe started",
+		"broker", config.RedactedAMQPURL(cfg.RabbitMQ.URL),
+		"exchange", cfg.RabbitMQ.InputExchange,
+		"queue", cfg.RabbitMQ.Queue,
+	)
 	go probe.Run(ctx, func() { ready.Store(true) })
 
 	server := &http.Server{Addr: ":8080", Handler: newHealthMux(ready)}
@@ -106,7 +113,7 @@ func run(log *slog.Logger) error {
 }
 
 // newHealthMux builds the /health mux. Readiness is sticky: it starts false
-// and flips true once the Kafka probe verifies connectivity, never back.
+// and flips true once the RabbitMQ probe verifies connectivity, never back.
 func newHealthMux(ready *atomic.Bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

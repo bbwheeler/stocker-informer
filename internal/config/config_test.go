@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -11,16 +12,38 @@ const (
 	testToken    = "test-token-value"
 	testAccess   = "test-access-key"
 	testSecret   = "test-secret-key"
+
+	testRabbitMQURL = "amqp://stocker:dYO81E36p5KOON@192.168.1.48:5672/"
 )
 
+// unsetEnv removes key for the duration of the test. t.Setenv registers the
+// restoration of the original value during cleanup.
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+
+	t.Setenv(key, "")
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+}
+
 // setValidEnv sets every variable the loader reads, so tests do not depend on
-// the caller's environment. Optional variables are explicitly cleared.
+// the caller's environment. Optional variables are explicitly cleared; the
+// RabbitMQ names are unset to exercise the absent-value defaults.
 func setValidEnv(t *testing.T) {
 	t.Helper()
 
-	t.Setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-	t.Setenv("KAFKA_TOPIC", "stock.summary.available.v1")
-	t.Setenv("KAFKA_CONSUMER_GROUP", "stocker-informer")
+	for _, name := range []string{
+		"RABBITMQ_URL",
+		"RABBITMQ_INPUT_EXCHANGE",
+		"RABBITMQ_INPUT_EXCHANGE_TYPE",
+		"RABBITMQ_INPUT_ROUTING_KEY",
+		"RABBITMQ_QUEUE",
+		"RABBITMQ_PREFETCH",
+		"RABBITMQ_CONNECT_TIMEOUT_SECONDS",
+	} {
+		unsetEnv(t, name)
+	}
 
 	t.Setenv("GOTOSOCIAL_INSTANCE", testInstance)
 	t.Setenv("GOTOSOCIAL_USER", "bot")
@@ -85,9 +108,6 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadMissingRequired(t *testing.T) {
 	required := []string{
-		"KAFKA_BOOTSTRAP_SERVERS",
-		"KAFKA_TOPIC",
-		"KAFKA_CONSUMER_GROUP",
 		"GOTOSOCIAL_INSTANCE",
 		"GOTOSOCIAL_USER",
 		"GOTOSOCIAL_TOKEN",
@@ -314,105 +334,9 @@ func TestLoadS3PathPrefixNormalized(t *testing.T) {
 	}
 }
 
-func TestLoadBrokers(t *testing.T) {
-	setValidEnv(t)
-	t.Setenv("KAFKA_BOOTSTRAP_SERVERS", "a:1, b:2,,")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v, want nil", err)
-	}
-	got := cfg.KafkaServers()
-	want := []string{"a:1", "b:2"}
-	if len(got) != len(want) {
-		t.Fatalf("KafkaServers() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("KafkaServers()[%d] = %q, want %q", i, got[i], want[i])
-		}
-	}
-
-	t.Run("no non-empty broker", func(t *testing.T) {
-		setValidEnv(t)
-		t.Setenv("KAFKA_BOOTSTRAP_SERVERS", ",")
-
-		if _, err := Load(); err == nil {
-			t.Fatal("Load() error = nil, want error")
-		} else if !strings.Contains(err.Error(), "KAFKA_BOOTSTRAP_SERVERS") {
-			t.Errorf("error %q does not name KAFKA_BOOTSTRAP_SERVERS", err)
-		}
-	})
-}
-
-func TestLoadBrokerAddressValidation(t *testing.T) {
-	tests := []struct {
-		name      string
-		servers   string
-		wantErr   bool
-		wantParts []string
-	}{
-		{name: "localhost host", servers: "localhost:9092"},
-		{name: "ipv4 host", servers: "192.168.1.48:9094"},
-		{name: "ipv6 host", servers: "[::1]:9092"},
-		{name: "dns hostname", servers: "kafka.internal:9092"},
-		{name: "list with empties", servers: "a:1, b:2,,"},
-		{name: "missing port", servers: "localhost", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "host:port"}},
-		{name: "empty host", servers: ":9092", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "host and a port"}},
-		{name: "empty port", servers: "localhost:", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "host and a port"}},
-		{name: "non numeric port", servers: "localhost:abc", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "invalid port"}},
-		{name: "zero port", servers: "localhost:0", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "invalid port"}},
-		{name: "port too large", servers: "localhost:70000", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "invalid port"}},
-		{name: "url form", servers: "http://localhost:9092", wantErr: true, wantParts: []string{"KAFKA_BOOTSTRAP_SERVERS", "host:port"}},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			setValidEnv(t)
-			t.Setenv("KAFKA_BOOTSTRAP_SERVERS", tc.servers)
-
-			_, err := Load()
-			if !tc.wantErr {
-				if err != nil {
-					t.Fatalf("Load() error = %v, want nil", err)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatalf("Load() with %q error = nil, want error", tc.servers)
-			}
-			for _, part := range tc.wantParts {
-				if !strings.Contains(err.Error(), part) {
-					t.Errorf("error %q does not contain %q", err, part)
-				}
-			}
-		})
-	}
-}
-
-func TestLoadInvalidBrokerAggregates(t *testing.T) {
-	setValidEnv(t)
-	t.Setenv("KAFKA_BOOTSTRAP_SERVERS", "bogus,also-bad")
-	t.Setenv("KAFKA_TOPIC", "")
-
-	_, err := Load()
-	if err == nil {
-		t.Fatal("Load() error = nil, want error")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "invalid configuration:") {
-		t.Errorf("error %q is not aggregated", msg)
-	}
-	for _, name := range []string{"KAFKA_BOOTSTRAP_SERVERS", "KAFKA_TOPIC"} {
-		if !strings.Contains(msg, name) {
-			t.Errorf("error %q does not name %s", msg, name)
-		}
-	}
-}
-
 func TestLoadAggregatesErrors(t *testing.T) {
 	setValidEnv(t)
-	t.Setenv("KAFKA_TOPIC", "")
+	t.Setenv("GOTOSOCIAL_USER", "")
 	t.Setenv("S3_BUCKET", "")
 
 	_, err := Load()
@@ -423,7 +347,7 @@ func TestLoadAggregatesErrors(t *testing.T) {
 	if !strings.Contains(msg, "invalid configuration:") {
 		t.Errorf("error %q is not aggregated", msg)
 	}
-	for _, name := range []string{"KAFKA_TOPIC", "S3_BUCKET"} {
+	for _, name := range []string{"GOTOSOCIAL_USER", "S3_BUCKET"} {
 		if !strings.Contains(msg, name) {
 			t.Errorf("error %q does not name %s", msg, name)
 		}
@@ -432,7 +356,7 @@ func TestLoadAggregatesErrors(t *testing.T) {
 
 func TestLoadErrorsDoNotLeakSecrets(t *testing.T) {
 	setValidEnv(t)
-	t.Setenv("KAFKA_TOPIC", "")
+	t.Setenv("S3_BUCKET", "")
 
 	_, err := Load()
 	if err == nil {
@@ -682,5 +606,373 @@ func TestLoadOllamaInvalidValuesAggregated(t *testing.T) {
 		if !strings.Contains(msg, name) {
 			t.Errorf("error %q does not name %s", msg, name)
 		}
+	}
+}
+
+func TestLoadRabbitMQDefaults(t *testing.T) {
+	setValidEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+
+	want := RabbitMQConfig{
+		URL:               testRabbitMQURL,
+		InputExchange:     "stock.summary",
+		InputExchangeType: "topic",
+		InputRoutingKey:   "stock.summary.available.v1",
+		Queue:             "stocker-informer",
+		Prefetch:          1,
+		ConnectTimeout:    10 * time.Second,
+	}
+	if cfg.RabbitMQ != want {
+		t.Errorf("RabbitMQ = %+v, want %+v", cfg.RabbitMQ, want)
+	}
+}
+
+func TestLoadRabbitMQURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		url       string
+		wantParts []string
+	}{
+		{name: "amqp", url: "amqp://stocker:secret@broker.internal:5672/"},
+		{name: "amqps", url: "amqps://broker.internal:5671/vhost"},
+		{name: "custom port", url: "amqp://broker.internal:5673/"},
+		{name: "ipv6 host", url: "amqp://[::1]:5672/"},
+		{name: "surrounding whitespace trimmed", url: "  amqp://broker.internal:5672/  "},
+		{name: "missing scheme", url: "broker.internal:5672", wantParts: []string{"RABBITMQ_URL", "scheme"}},
+		{name: "http scheme", url: "http://broker.internal:5672", wantParts: []string{"RABBITMQ_URL", "amqp:// or amqps://"}},
+		{name: "empty host", url: "amqp://", wantParts: []string{"RABBITMQ_URL", "include a host"}},
+		{name: "missing host with credentials", url: "amqp://user:supersecret@/vhost", wantParts: []string{"RABBITMQ_URL", "include a host"}},
+		{name: "port zero", url: "amqp://broker.internal:0/", wantParts: []string{"RABBITMQ_URL", "port (1-65535)"}},
+		{name: "port too large", url: "amqp://broker.internal:65536/", wantParts: []string{"RABBITMQ_URL", "port (1-65535)"}},
+		{name: "non numeric port", url: "amqp://broker.internal:abc/", wantParts: []string{"RABBITMQ_URL", "port (1-65535)"}},
+		{name: "garbage", url: "not-a-url", wantParts: []string{"RABBITMQ_URL", "scheme"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("RABBITMQ_URL", tc.url)
+
+			cfg, err := Load()
+			if len(tc.wantParts) > 0 {
+				if err == nil {
+					t.Fatalf("Load() with RABBITMQ_URL=%q error = nil, want error", tc.url)
+				}
+				for _, part := range tc.wantParts {
+					if !strings.Contains(err.Error(), part) {
+						t.Errorf("error %q does not contain %q", err, part)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error = %v, want nil", err)
+			}
+			if want := strings.TrimSpace(tc.url); cfg.RabbitMQ.URL != want {
+				t.Errorf("RabbitMQ.URL = %q, want %q", cfg.RabbitMQ.URL, want)
+			}
+		})
+	}
+}
+
+// rabbitMQNameValue returns the loaded value for one of the RabbitMQ name
+// variables so the name tests can share one table.
+func rabbitMQNameValue(t *testing.T, cfg *Config, name string) string {
+	t.Helper()
+
+	switch name {
+	case "RABBITMQ_INPUT_EXCHANGE":
+		return cfg.RabbitMQ.InputExchange
+	case "RABBITMQ_INPUT_ROUTING_KEY":
+		return cfg.RabbitMQ.InputRoutingKey
+	case "RABBITMQ_QUEUE":
+		return cfg.RabbitMQ.Queue
+	default:
+		t.Fatalf("unknown RabbitMQ name variable %q", name)
+		return ""
+	}
+}
+
+func TestLoadRabbitMQNameVariables(t *testing.T) {
+	variables := []struct {
+		name string
+		def  string
+	}{
+		{name: "RABBITMQ_INPUT_EXCHANGE", def: "stock.summary"},
+		{name: "RABBITMQ_INPUT_ROUTING_KEY", def: "stock.summary.available.v1"},
+		{name: "RABBITMQ_QUEUE", def: "stocker-informer"},
+	}
+
+	for _, variable := range variables {
+		t.Run(variable.name, func(t *testing.T) {
+			t.Run("absent uses default", func(t *testing.T) {
+				setValidEnv(t)
+
+				cfg, err := Load()
+				if err != nil {
+					t.Fatalf("Load() error = %v, want nil", err)
+				}
+				if got := rabbitMQNameValue(t, cfg, variable.name); got != variable.def {
+					t.Errorf("%s = %q, want %q", variable.name, got, variable.def)
+				}
+			})
+
+			t.Run("custom value accepted", func(t *testing.T) {
+				setValidEnv(t)
+				t.Setenv(variable.name, "  custom.value  ")
+
+				cfg, err := Load()
+				if err != nil {
+					t.Fatalf("Load() error = %v, want nil", err)
+				}
+				if got := rabbitMQNameValue(t, cfg, variable.name); got != "custom.value" {
+					t.Errorf("%s = %q, want %q", variable.name, got, "custom.value")
+				}
+			})
+
+			t.Run("present and blank rejected", func(t *testing.T) {
+				setValidEnv(t)
+				t.Setenv(variable.name, "   ")
+
+				_, err := Load()
+				if err == nil {
+					t.Fatalf("Load() with blank %s error = nil, want error", variable.name)
+				}
+				for _, want := range []string{variable.name, "must be non-empty"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not contain %q", err, want)
+					}
+				}
+			})
+
+			t.Run("256 bytes rejected", func(t *testing.T) {
+				setValidEnv(t)
+				t.Setenv(variable.name, strings.Repeat("n", 256))
+
+				_, err := Load()
+				if err == nil {
+					t.Fatalf("Load() with 256-byte %s error = nil, want error", variable.name)
+				}
+				for _, want := range []string{variable.name, "at most 255 bytes (got 256)"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not contain %q", err, want)
+					}
+				}
+			})
+
+			t.Run("255 bytes accepted", func(t *testing.T) {
+				setValidEnv(t)
+				name := strings.Repeat("n", 255)
+				t.Setenv(variable.name, name)
+
+				cfg, err := Load()
+				if err != nil {
+					t.Fatalf("Load() error = %v, want nil", err)
+				}
+				if got := rabbitMQNameValue(t, cfg, variable.name); got != name {
+					t.Errorf("%s = %q, want 255-byte name", variable.name, got)
+				}
+			})
+		})
+	}
+}
+
+func TestLoadRabbitMQExchangeType(t *testing.T) {
+	tests := []struct {
+		raw     string
+		want    string
+		wantErr bool
+	}{
+		{raw: "", want: "topic"},
+		{raw: "TOPIC", want: "topic"},
+		{raw: "Direct", want: "direct"},
+		{raw: "fanout", want: "fanout"},
+		{raw: "headers", want: "headers"},
+		{raw: "x-direct", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.raw, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("RABBITMQ_INPUT_EXCHANGE_TYPE", tc.raw)
+
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load() with exchange type %q error = nil, want error", tc.raw)
+				}
+				for _, want := range []string{"RABBITMQ_INPUT_EXCHANGE_TYPE", "direct|topic|fanout|headers"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not contain %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error = %v, want nil", err)
+			}
+			if cfg.RabbitMQ.InputExchangeType != tc.want {
+				t.Errorf("InputExchangeType = %q, want %q", cfg.RabbitMQ.InputExchangeType, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRabbitMQPrefetch(t *testing.T) {
+	tests := []struct {
+		raw       string
+		want      int
+		wantParts []string
+	}{
+		{raw: "", want: 1},
+		{raw: "1", want: 1},
+		{raw: "10", want: 10},
+		{raw: "65535", want: 65535},
+		{raw: "0", wantParts: []string{"RABBITMQ_PREFETCH", "must be > 0 (got 0)"}},
+		{raw: "-1", wantParts: []string{"RABBITMQ_PREFETCH", "must be > 0 (got -1)"}},
+		{raw: "65536", wantParts: []string{"RABBITMQ_PREFETCH", "must be <= 65535 (got 65536)"}},
+		{raw: "abc", wantParts: []string{"RABBITMQ_PREFETCH", "must be an integer"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.raw, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("RABBITMQ_PREFETCH", tc.raw)
+
+			cfg, err := Load()
+			if len(tc.wantParts) > 0 {
+				if err == nil {
+					t.Fatalf("Load() with RABBITMQ_PREFETCH=%q error = nil, want error", tc.raw)
+				}
+				for _, part := range tc.wantParts {
+					if !strings.Contains(err.Error(), part) {
+						t.Errorf("error %q does not contain %q", err, part)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error = %v, want nil", err)
+			}
+			if cfg.RabbitMQ.Prefetch != tc.want {
+				t.Errorf("RabbitMQ.Prefetch = %d, want %d", cfg.RabbitMQ.Prefetch, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRabbitMQConnectTimeout(t *testing.T) {
+	tests := []struct {
+		raw       string
+		want      time.Duration
+		wantParts []string
+	}{
+		{raw: "", want: 10 * time.Second},
+		{raw: "1", want: time.Second},
+		{raw: "10", want: 10 * time.Second},
+		{raw: "300", want: 300 * time.Second},
+		{raw: "0", wantParts: []string{"RABBITMQ_CONNECT_TIMEOUT_SECONDS", "must be > 0 (got 0)"}},
+		{raw: "301", wantParts: []string{"RABBITMQ_CONNECT_TIMEOUT_SECONDS", "must be <= 300 (got 301)"}},
+		{raw: "abc", wantParts: []string{"RABBITMQ_CONNECT_TIMEOUT_SECONDS", "must be an integer"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.raw, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("RABBITMQ_CONNECT_TIMEOUT_SECONDS", tc.raw)
+
+			cfg, err := Load()
+			if len(tc.wantParts) > 0 {
+				if err == nil {
+					t.Fatalf("Load() with RABBITMQ_CONNECT_TIMEOUT_SECONDS=%q error = nil, want error", tc.raw)
+				}
+				for _, part := range tc.wantParts {
+					if !strings.Contains(err.Error(), part) {
+						t.Errorf("error %q does not contain %q", err, part)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error = %v, want nil", err)
+			}
+			if cfg.RabbitMQ.ConnectTimeout != tc.want {
+				t.Errorf("RabbitMQ.ConnectTimeout = %v, want %v", cfg.RabbitMQ.ConnectTimeout, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRabbitMQInvalidValuesAggregated(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("RABBITMQ_URL", "http://broker.internal")
+	t.Setenv("RABBITMQ_QUEUE", "")
+	t.Setenv("RABBITMQ_PREFETCH", "abc")
+	t.Setenv("RABBITMQ_CONNECT_TIMEOUT_SECONDS", "0")
+	t.Setenv("S3_BUCKET", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "invalid configuration: ") {
+		t.Errorf("error %q is not an aggregated configuration error", msg)
+	}
+	for _, name := range []string{
+		"RABBITMQ_URL",
+		"RABBITMQ_QUEUE",
+		"RABBITMQ_PREFETCH",
+		"RABBITMQ_CONNECT_TIMEOUT_SECONDS",
+		"S3_BUCKET",
+	} {
+		if !strings.Contains(msg, name) {
+			t.Errorf("error %q does not name %s", msg, name)
+		}
+	}
+}
+
+func TestLoadRabbitMQURLErrorsDoNotLeakCredentials(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("RABBITMQ_URL", "amqp://user:supersecret@/missing-host")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+	if strings.Contains(err.Error(), "supersecret") {
+		t.Errorf("error %q leaks the broker password", err)
+	}
+}
+
+func TestRedactedAMQPURL(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "default", raw: testRabbitMQURL, want: "amqp://192.168.1.48:5672/"},
+		{name: "user info dropped", raw: "amqps://user:pass@broker.internal:5671/vhost", want: "amqps://broker.internal:5671/vhost"},
+		{name: "query dropped", raw: "amqp://broker.internal:5672/vhost?heartbeat=30", want: "amqp://broker.internal:5672/vhost"},
+		{name: "fragment dropped", raw: "amqp://broker.internal:5672/vhost#frag", want: "amqp://broker.internal:5672/vhost"},
+		{name: "empty", raw: "", want: "<invalid>"},
+		{name: "garbage", raw: "not-a-url", want: "<invalid>"},
+		{name: "missing host", raw: "amqp://user:secret@/vhost", want: "<invalid>"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactedAMQPURL(tc.raw)
+			if got != tc.want {
+				t.Errorf("RedactedAMQPURL(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+			if strings.Contains(got, "secret") || strings.Contains(got, "pass") || strings.Contains(got, "heartbeat") {
+				t.Errorf("RedactedAMQPURL(%q) = %q, want no credentials or query", tc.raw, got)
+			}
+		})
 	}
 }
