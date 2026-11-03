@@ -39,8 +39,9 @@ type channel interface {
 	Close() error
 }
 
-// dialFunc opens one connection. The context bounds the TCP dial and timeout
-// bounds the dial attempt, so shutdown never waits on an unreachable broker.
+// dialFunc opens one connection. The context bounds the TCP dial, and the
+// deadline it produces (timeout, or the earlier context deadline) bounds the
+
 type dialFunc func(ctx context.Context, url string, timeout time.Duration) (connection, error)
 
 // session owns one connection, channel, and deliveries stream.
@@ -116,16 +117,36 @@ func (c *amqpConnection) Channel() (channel, error) {
 
 func (c *amqpConnection) Close() error { return c.conn.Close() }
 
-// dialAMQP is the production dialer. The TCP dial is bounded by timeout and by
-// ctx; the 10s heartbeat bounds a broker that accepts the connection but
-// stops answering. Client errors are returned unwrapped: they describe the
-// host, port, and protocol, never the URL, so credentials cannot leak.
+// dialAMQP is the production dialer. The whole connect attempt — TCP dial and
+// AMQP/TLS handshake — is bounded by timeout (and immediately by ctx when it
+// carries an earlier deadline); afterwards the 10s heartbeat bounds a broker
+// that stops answering. The handshake bound is passed via a connection
+// deadline because amqp091-go applies a handshake deadline only to its own
+// default dialer, never to a custom one. Client errors are returned
+// unwrapped: they describe the host, port, and protocol, never the URL, so
+// credentials cannot leak.
 func dialAMQP(ctx context.Context, rawURL string, timeout time.Duration) (connection, error) {
+	deadline := time.Now().Add(timeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
 	conf := amqp.Config{
 		Heartbeat: 10 * time.Second,
 		Dial: func(network, addr string) (net.Conn, error) {
-			dialer := &net.Dialer{Timeout: timeout}
-			return dialer.DialContext(ctx, network, addr)
+			dialer := &net.Dialer{Timeout: timeout, Deadline: deadline}
+			conn, err := dialer.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			// Deadlines are not set yet because heartbeating has not
+			// started, so a dead server must not stall the handshake.
+			// The library clears them in openComplete once the
+			// connection is live.
+			if err := conn.SetDeadline(deadline); err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+			return conn, nil
 		},
 	}
 	conn, err := amqp.DialConfig(rawURL, conf)

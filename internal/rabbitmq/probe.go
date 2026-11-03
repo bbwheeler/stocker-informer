@@ -119,8 +119,10 @@ func (p *Probe) Check(ctx context.Context) error {
 		}
 		conn = res.conn
 	case <-attemptCtx.Done():
-		// The dialer honors the attempt context, so there is nothing
-		// to close yet.
+		// The dialer cannot outlive the attempt: the dial context and the
+		// connection deadline (both derived from this context) bound the
+		// TCP dial and the AMQP handshake, so there is nothing to close
+		// yet at this point.
 		return fmt.Errorf("rabbitmq probe attempt aborted after %v: %w", p.attemptTimeout, attemptCtx.Err())
 	}
 

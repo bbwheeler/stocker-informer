@@ -148,7 +148,7 @@ Secret values (`GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) are never i
 | `RABBITMQ_INPUT_ROUTING_KEY` | optional, default `stock.summary.available.v1` | no | Binding key from the exchange to the queue, and the key the producer must publish under. Same present/non-blank/255-byte rule as the exchange. |
 | `RABBITMQ_QUEUE` | optional, default `stocker-informer` | no | Durable, non-exclusive, non-auto-delete queue the consumer declares and consumes. Same present/non-blank/255-byte rule as the exchange. |
 | `RABBITMQ_PREFETCH` | optional, default `1` | no | Per-consumer QoS prefetch count (`Qos(prefetch, 0, false)`). Absent or blank uses the default; otherwise an integer in `[1, 65535]` (the AMQP prefetch field is 16 bits). |
-| `RABBITMQ_CONNECT_TIMEOUT_SECONDS` | optional, default `10` | no | TCP dial timeout for each connect attempt, in seconds. Absent or blank uses the default; otherwise an integer in `[1, 300]`. |
+| `RABBITMQ_CONNECT_TIMEOUT_SECONDS` | optional, default `10` | no | Connect timeout in seconds for each attempt: it bounds the TCP dial and — through a connection deadline — the AMQP/TLS handshake, so a broker that accepts TCP but stalls cannot hang a connect. Absent or blank uses the default; otherwise an integer in `[1, 300]`. |
 | `GOTOSOCIAL_INSTANCE` | **Required** | no | Absolute `http(s)` base URL of the instance (scheme + host), e.g. `https://wheeli.social`. The publisher POSTs to `{GOTOSOCIAL_INSTANCE}/api/v1/statuses`. |
 | `GOTOSOCIAL_USER` | **Required** | no | Account name. Stored and logged only as metadata; the publish request authenticates with the Bearer token. |
 | `GOTOSOCIAL_TOKEN` | **Required** | **yes** | Bearer token for `/api/v1/statuses`, sent as `Authorization: Bearer <token>`. Never logged. |
