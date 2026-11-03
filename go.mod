@@ -9,6 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.8
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.2
 	github.com/aws/smithy-go v1.28.4
+	github.com/rabbitmq/amqp091-go v1.16.0
 	github.com/segmentio/kafka-go v0.4.51
 	google.golang.org/protobuf v1.36.12
 )
@@ -29,7 +30,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.3 // indirect
 	github.com/klauspost/compress v1.15.9 // indirect
 	github.com/pierrec/lz4/v4 v4.1.15 // indirect
-	github.com/rabbitmq/amqp091-go v1.16.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
