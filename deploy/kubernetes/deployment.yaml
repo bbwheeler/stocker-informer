@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stocker-informer
+  namespace: stocker
+  labels:
+    app.kubernetes.io/name: stocker-informer
+    app.kubernetes.io/part-of: stocker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: stocker-informer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: stocker-informer
+        app.kubernetes.io/part-of: stocker
+    spec:
+      imagePullSecrets:
+        - name: wheeli-registry
+      containers:
+        - name: stocker-informer
+          image: git.wheeli.ca/brian/stocker-informer:latest
+          imagePullPolicy: Always
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          envFrom:
+            - configMapRef:
+                name: stocker-informer-config
+            - secretRef:
+                name: stocker-informer-env
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
