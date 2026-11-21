@@ -619,10 +619,10 @@ func TestLoadRabbitMQDefaults(t *testing.T) {
 
 	want := RabbitMQConfig{
 		URL:               testRabbitMQURL,
-		InputExchange:     "stock.summary",
+		InputExchange:     "stocker",
 		InputExchangeType: "topic",
-		InputRoutingKey:   "stock.summary.available.v1",
-		Queue:             "stocker-informer",
+		InputRoutingKey:   "stock.gems.v1.#",
+		Queue:             "stock.gems.v1.informer",
 		Prefetch:          1,
 		ConnectTimeout:    10 * time.Second,
 	}
@@ -702,9 +702,9 @@ func TestLoadRabbitMQNameVariables(t *testing.T) {
 		name string
 		def  string
 	}{
-		{name: "RABBITMQ_INPUT_EXCHANGE", def: "stock.summary"},
-		{name: "RABBITMQ_INPUT_ROUTING_KEY", def: "stock.summary.available.v1"},
-		{name: "RABBITMQ_QUEUE", def: "stocker-informer"},
+		{name: "RABBITMQ_INPUT_EXCHANGE", def: "stocker"},
+		{name: "RABBITMQ_INPUT_ROUTING_KEY", def: "stock.gems.v1.#"},
+		{name: "RABBITMQ_QUEUE", def: "stock.gems.v1.informer"},
 	}
 
 	for _, variable := range variables {

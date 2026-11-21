@@ -28,10 +28,10 @@ const (
 	defaultOllamaMaxTokens   = 1024
 
 	defaultRabbitMQURL                   = "amqp://stocker:dYO81E36p5KOON@192.168.1.48:5672/"
-	defaultRabbitMQInputExchange         = "stock.summary"
+	defaultRabbitMQInputExchange         = "stocker"
 	defaultRabbitMQInputExchangeType     = "topic"
-	defaultRabbitMQInputRoutingKey       = "stock.summary.available.v1"
-	defaultRabbitMQQueue                 = "stocker-informer"
+	defaultRabbitMQInputRoutingKey       = "stock.gems.v1.#"
+	defaultRabbitMQQueue                 = "stock.gems.v1.informer"
 	defaultRabbitMQPrefetch              = 1
 	defaultRabbitMQConnectTimeoutSeconds = 10
 	// maxRabbitMQPrefetch is the AMQP prefetch field width.
