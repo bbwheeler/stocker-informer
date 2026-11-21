@@ -12,5 +12,5 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/stocker-informer ./cmd/server
 # runtime stage
 FROM gcr.io/distroless/static-debian12
 COPY --from=build /out/stocker-informer /stocker-informer
-USER 65534:65534
+USER 65532:65532
 ENTRYPOINT ["/stocker-informer"]
