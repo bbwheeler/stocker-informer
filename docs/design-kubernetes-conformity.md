@@ -62,14 +62,13 @@ Observed conventions, verbatim from the files:
 | Resources | requests `cpu: 50m`, `memory: 128Mi`; limits `memory: 512Mi` (no CPU limit) |
 | Container securityContext | `allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`, `runAsNonRoot: true`, `seccompProfile.type: RuntimeDefault`, `runAsUser: 65532`, `runAsGroup: 65532` |
 | Pod securityContext | None (container-level only) |
-| Secret | Comment-headed template, `stringData`, `REPLACE_ME`/`RABBITMQ_PASSWORD` placeholders, in-cluster broker URL `rabbitmq.messaging.svc.cluster.local:5672` |
+| Secret | Comment-headed template, `stringData`, `RABBITMQ_PASSWORD`/`DB_PASSWORD` placeholders, in-cluster broker URL `rabbitmq.messaging.svc.cluster.local:5672` |
 
-Two corrections to the task brief, based on the files themselves:
+Two points worth calling out, since a quick reading can miss them:
 
-- The brief said stocker-store has no resources stanza. It does, and the
-  informer will copy it exactly.
-- The brief said the readiness probe is the only probe. That matches: there is
-  no liveness probe.
+- stocker-store does have a resources stanza, and the informer copies it
+  exactly (D5).
+- The readiness probe is the only probe: there is no liveness probe (D6).
 
 ## 3. Current stocker-informer state and the drift
 
@@ -109,13 +108,14 @@ truth; leaving them would invite partial applies.
 ### D2: Plain `app` labels, no metadata labels
 
 Selector and pod-template labels become `app: stocker-informer`. The
-Deployment, ConfigMap, Secret, and Namespace carry no `labels` block beyond
-`name`/`namespace`. The `app.kubernetes.io/*` keys are removed everywhere.
+Deployment, ConfigMap, Secret, and Namespace carry no `labels` block at all;
+their metadata is limited to `name`, plus `namespace` where the kind needs it.
+The `app.kubernetes.io/*` keys are removed everywhere.
 
 Rationale: the gold standard uses `app` for match labels. Adding both
 schemes would be redundant, and keeping only the old scheme would break a
 fleet-wide `-l app=<service>` query. The Service selector does not exist here
-(D8), so `app` only has to match the Deployment selector.
+(D7), so `app` only has to match the Deployment selector.
 
 ### D3: No imagePullSecrets
 
@@ -129,7 +129,7 @@ secret reference the gold standard does not use would also mean an undeclared
 cluster dependency. Risk: if registry access was in fact provided only by
 that secret, the first pull after rollout fails with `ErrImagePull`; the
 rollback is to re-add the two lines, and the operator confirms registry
-behaviour before rollout (Task 1 verification in the plan).
+behaviour in the rollout check at the end of the plan.
 
 ### D4: Exact gold-standard security context
 
@@ -177,10 +177,11 @@ the RabbitMQ probe has passively verified the exchange and queue, then `200`,
 and it is sticky afterwards. A `tcpSocket` probe on `:8080` would report ready
 while the broker topology is still missing.
 
-The liveness probe is dropped, matching the gold standard. Because readiness
-is sticky, `/health` never fails after the first success, so the liveness
-probe could not detect the failures it appears to guard; it only added a
-restart path for a process that already exits on its own errors.
+The liveness probe is dropped, matching the gold standard. Because `/health`
+is sticky, it never fails after the first success, so a liveness probe on that
+path could never fire; it would only be a way to restart a healthy process.
+The consumer already retries broker failures forever instead of exiting, so
+there is no failure mode for the liveness probe to catch.
 
 Probe timing mirrors stocker-store: `initialDelaySeconds: 5`,
 `periodSeconds: 10`, target the named port `health` rather than the number.
@@ -224,23 +225,26 @@ working. The URL validation and redaction code (`validateAMQPURL`,
 
 ### D10: Secret template mirrors the gold standard
 
-`secret.yaml` gets the same two comment lines (adapted name), an Opaque
+`secret.yaml` gets the same three comment lines (adapted name), an Opaque
 Secret `stocker-informer-env` in `stocker`, and `stringData` with the
 in-cluster broker URL plus `REPLACE_ME` placeholders for the S3 keys and the
 GoToSocial token. `S3_BUCKET` stays a ConfigMap placeholder because it is not
 a secret.
 
-The template is committed with placeholders only. It is applied once with
-real values and the filled copy stays out of git, exactly as the gold standard
-comment instructs.
+The template is committed with placeholders only. Operators copy it outside
+the repository (for example `/tmp/stocker-informer-secret.yaml`), fill the
+copy, and apply that; the tracked file is never edited in place, so a real
+credential cannot be committed by accident. The gold-standard comment says
+the same thing.
 
 ### D11: ConfigMap holds non-secret values, with no comments
 
-All RabbitMQ, Garage/S3, GoToSocial (instance/user/audience), and Ollama
-settings move into the main file's ConfigMap with the current values, except
-the new RabbitMQ topology. The existing explanatory comments are removed so
-the file reads like the gold standard; explanations live in this design
-document and in `README.md`.
+Every non-secret setting the service currently receives moves into the main
+file's ConfigMap with its current value, except the new RabbitMQ topology.
+Optional keys that are unset today (`S3_PATH_PREFIX`, `GOTOSOCIAL_RECIPIENT`,
+`OLLAMA_SYSTEM_PROMPT`) are omitted so the compiled-in defaults apply. The
+existing explanatory comments are removed so the file reads like the gold
+standard; explanations live in this design document and in `README.md`.
 
 ### D12: Namespace is declared, not assumed
 
@@ -352,8 +356,8 @@ Notes:
 - Resource order (`ports`, `envFrom`, probes, `resources`, `securityContext`)
   follows stocker-store so diffs across repositories line up.
 - `protocol: TCP` is omitted on the port, as in stocker-store.
-- `S3_BUCKET: REPLACE_ME` is an operator-filled ConfigMap value, exactly like
-  stocker-store's `STOCK_TTL`/environment values are operator-owned.
+- `S3_BUCKET: REPLACE_ME` is an operator-owned value, like every value in
+  stocker-store's ConfigMap.
 
 ### 5.3 `deploy/kubernetes/secret.yaml`
 
@@ -429,8 +433,10 @@ broker answers `PRECONDITION_FAILED` (406); that is a configuration fault,
 not something the consumer can repair.
 
 The readiness probe passively declares the exchange and queue, so it turns
-ready only after the exchange exists with type `topic` and the queue exists as
-durable and non-exclusive.
+ready only after both exist. Passive declaration verifies existence, not
+arguments, so the probe cannot prove the queue's durability or flags; the
+consumer's active declaration is what reports a mismatched object with
+`PRECONDITION_FAILED`.
 
 ### 6.3 Producer contract
 
@@ -451,8 +457,9 @@ the key, so no Garage data moves when the broker topology changes.
 ### 6.5 Rollout and cleanup
 
 1. Confirm the producer publishes `stock.gems.v1.*` to `stocker`.
-2. Apply `stocker-informer.yaml` and the filled `secret.yaml`; the consumer
-   creates the queue and binding on its first connect.
+2. Copy `secret.yaml` outside the repository, fill the copy, and apply
+   `stocker-informer.yaml` plus that copy; the consumer creates the queue and
+   binding on its first connect.
 3. Verify readiness, one end-to-end post, and the log line
    `rabbitmq consumer connected` carrying the new exchange, routing key, and
    queue.
@@ -467,12 +474,13 @@ the key, so no Garage data moves when the broker topology changes.
 
 ### 6.6 Impact on existing deployments
 
-Any host or quadlet deployment that relied on the compiled-in defaults now
-picks up the new topology on upgrade. The shipped
-`deploy/quadlet/.env.podman.example` is updated, and operators must update
-their live `~/.config/stocker-informer/.env.podman` in the same window if they
-have not migrated to the new topology. Explicit values in that env file
-override the new defaults, which makes the migration opt-in per host.
+A host or quadlet deployment that relies on the compiled-in defaults moves to
+the new topology on upgrade, with no file edits. The shipped
+`deploy/quadlet/.env.podman.example` is updated, but a live
+`~/.config/stocker-informer/.env.podman` that still carries the old explicit
+values keeps the old topology, because explicit values override the new
+defaults. Operators with explicit values migrate by editing that file in the
+same window; the env file remains the per-host source of truth.
 
 ## 7. Code and documentation touchpoints
 
@@ -484,7 +492,7 @@ override the new defaults, which makes the migration opt-in per host.
 | `internal/rabbitmq/probe_test.go` | Fake 404 messages and name assertions driven by `testCfg()` |
 | `internal/rabbitmq/consumer_live_test.go` | Comment only; the live test builds its own unique topology |
 | `deploy/quadlet/.env.podman.example` | New values; variable names unchanged |
-| `README.md` | Environment table, producer section, topology bullets, end-to-end check, structure tree, UID |
+| `README.md` | Environment table, producer section, topology bullets, health-endpoint wording, end-to-end check, structure tree, UID |
 | `AGENTS.md` | Architecture defaults, environment defaults, structure, Kubernetes entry points |
 | `docs/deployment.md` | Live operator sections (topology checks, smoke test); historical tasks above the manual check stay |
 | `docs/design-kubernetes-deployment.md`, `docs/plan-kubernetes-deployment.md` | Marked superseded with a pointer here; content left for history |
@@ -501,6 +509,12 @@ The gold-standard security context runs the container as UID/GID `65532`.
 either way: distroless static ships both `nonroot` (65532) and `nobody`
 (65534), the binary is installed root-owned `0755` at `/stocker-informer`,
 and the process writes nothing.
+
+Nothing else pins a UID. `deploy/quadlet/stocker-informer.container` sets no
+`User=` line, so the quadlet path runs whatever the image `USER` says. (For
+reference, stocker-store's image sets no `USER` at all and relies entirely on
+the pod security context; the informer keeps a non-root image user for the
+quadlet path and only aligns the numeric value.)
 
 The image `USER` is still changed to `65532:65532` so that `podman run`
 (quadlet path) and Kubernetes use one UID. Two UIDs for one workload buys

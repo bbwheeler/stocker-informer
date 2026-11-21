@@ -42,14 +42,17 @@ decision, value, and rationale). Read it with this plan.
 - `RABBITMQ_URL`'s compiled-in default does not change; the in-cluster URL is
   supplied by `secret.yaml`.
 - No real credentials in git. Manifests contain `REPLACE_ME`,
-  `RABBITMQ_PASSWORD`, or values already committed in source.
+  `RABBITMQ_PASSWORD`, or values already committed in source. The tracked
+  `secret.yaml` stays a placeholder template; a filled copy is applied from
+  outside the repository and never added to git.
 - Conventional Go hygiene: `gofmt -l .` empty, `go vet ./...` clean,
   `go test ./...` green.
 
 ## Baseline (recorded before any change)
 
-Branch `feature/kubernetes-conformity` at `d7596fe` (same tree as
-`origin/main`). Commands and observed results on 2026-11-21:
+Baseline recorded at `d7596fe`, where the tree matched `origin/main`. The
+branch's later commits only add documentation (this plan and its design), so
+the code baseline is unchanged. Commands and observed results on 2026-11-21:
 
 | Command | Result |
 | --- | --- |
@@ -263,7 +266,7 @@ git commit -m "k8s: conform manifests to stocker-store gold standard"
 ### Task 2: Align the runtime image UID with the pod security context
 
 **Files:**
-- Modify: `Containerfile` (last line)
+- Modify: `Containerfile` (line 15, the `USER` line)
 
 **Interfaces:**
 - Consumes: nothing.
@@ -322,7 +325,8 @@ git commit -m "build: run container as uid 65532 to match pod securityContext"
 
 **Files:**
 - Test: `internal/config/config_test.go`
-- Modify: `internal/config/config.go:30-34`
+- Modify: `internal/config/config.go:31-34` (`defaultRabbitMQURL` on line 30
+  is deliberately untouched)
 
 **Interfaces:**
 - Consumes: nothing.
@@ -480,10 +484,10 @@ with:
 
 - [ ] **Step 2: Update the delivery routing keys in `consumer_test.go`**
 
-There are four places that build an `amqp.Delivery` (around lines 1293,
-1364, 1371, and 1439) plus the log assertion that checks the field. Replace
+Three places build an `amqp.Delivery` (around lines 1293, 1364, and 1439),
+and one log assertion checks the logged field (around line 1371). Replace
 every occurrence of `"stock.summary.available.v1"` **in those delivery
-fixtures and assertions** with `"stock.gems.v1.AAPL"`, for example:
+fixtures and the assertion** with `"stock.gems.v1.AAPL"`, for example:
 
 ```go
 			c.handleDelivery(context.Background(), sess, amqp.Delivery{
@@ -564,12 +568,13 @@ live test remains skipped.
 - [ ] **Step 7: Confirm no old topology value remains in the package**
 
 ```bash
-grep -rn "stock\.summary\|stocker-informer-live\|\"stocker-informer\"" internal/rabbitmq/*.go
+grep -rn "stock\.summary" internal/rabbitmq/*.go
+grep -rn 'Queue: *"stocker-informer"' internal/rabbitmq/*.go
 ```
 
-Expected: no output. (`stocker-informer-live-` names are unique live-test
-names, not the queue under test; if the grep matches the consumer-tag prefix
-constant, leave that constant alone.)
+Expected: no output from either. The `stocker-informer-` consumer-tag prefix
+(`consumerTagPrefix`) and the `stocker-informer-live-*` unique live-test names
+are unrelated to the queue under test and must stay as they are.
 
 - [ ] **Step 8: Commit**
 
@@ -616,9 +621,9 @@ grep -n "RABBITMQ" deploy/quadlet/.env.podman.example
 grep -rn "stock\.summary" deploy/quadlet/ ; echo "residue check exit: $?"
 ```
 
-Expected: the four new values plus `RABBITMQ_URL`, `RABBITMQ_PREFETCH`,
-`RABBITMQ_CONNECT_TIMEOUT_SECONDS`; residue grep prints nothing and exits
-`1`.
+Expected: the four new values, plus `RABBITMQ_PREFETCH`,
+`RABBITMQ_CONNECT_TIMEOUT_SECONDS`, and the commented `# RABBITMQ_URL=...`
+guidance lines; the residue grep prints nothing and exits `1`.
 
 - [ ] **Step 3: Commit**
 
@@ -683,14 +688,34 @@ Lines 229-230: replace the exchange/routing-key bullets with `Exchange:
 stocker` and `Routing key: stock.gems.v1.#`, keeping the variable references.
 
 Lines 490-492: replace the default values in the topology bullets with
-`stocker` and `stock.gems.v1.#`.
+`stocker`, `stock.gems.v1.#`, and `stock.gems.v1.informer`.
+
+Line 532: correct the health-endpoint description. The probe passively
+declares the exchange and queue to verify they exist; passive declaration does
+not check their arguments, so drop "checking its type and durability" and
+"checking `durable=true`, non-exclusive". Passive declares still create, bind,
+consume, and publish nothing.
 
 Line 552: change the publish instruction to `stocker` exchange and
 `stock.gems.v1.AAPL` routing key.
 
+Line 557: the restart check names the durable queue; change `stocker-informer`
+to `stock.gems.v1.informer`. Leave the `stocker-informer-<pid>` consumer tag on
+line 494 alone: it is not the queue name.
+
 - [ ] **Step 4: `README.md` repository tree**
 
-Extend the `deploy/` subtree so it lists both deployment paths:
+Replace the `docs/` entry and extend the `deploy/` subtree so both list the
+new files:
+
+```text
+├── docs/
+│   ├── deployment.md
+│   ├── design-kubernetes-conformity.md
+│   ├── design-kubernetes-deployment.md
+│   ├── plan-kubernetes-conformity.md
+│   └── plan-kubernetes-deployment.md
+```
 
 ```text
 └── deploy/
@@ -705,14 +730,17 @@ Extend the `deploy/` subtree so it lists both deployment paths:
 
 - [ ] **Step 5: `AGENTS.md` structure, architecture, and defaults**
 
-Structure block: add
+Structure block: replace the `deploy/quadlet/` line with
 
 ```text
 deploy/kubernetes/        # gold-standard manifests: stocker-informer.yaml + secret.yaml template
+deploy/quadlet/           # single rootless quadlet + .env.podman.example template
 ```
 
 and extend the `docs/` comment to list `deployment.md`,
-`design-kubernetes-conformity.md`, and `plan-kubernetes-conformity.md`.
+`design-kubernetes-conformity.md`, `plan-kubernetes-conformity.md`, and the
+two superseded documents (`design-kubernetes-deployment.md`,
+`plan-kubernetes-deployment.md`).
 
 Architecture paragraph: change the declared defaults to
 `RABBITMQ_INPUT_EXCHANGE` default `stocker` and `RABBITMQ_QUEUE` default
@@ -769,10 +797,11 @@ At the top of `docs/plan-kubernetes-deployment.md`, under the H1, add:
 grep -n "stock\.summary\|stocker-informer\` queue\|USER 65534\|65534" README.md AGENTS.md docs/deployment.md
 ```
 
-Expected: no output for README, AGENTS, and deployment.md. (If a historical
-section in `docs/deployment.md` intentionally names the old topology, add a
-one-line `Historical:` prefix there instead of deleting the record, and make
-sure the live sections above the manual check are clean.)
+Expected: no output. `docs/deployment.md` has no historical reference to the
+old topology: its Tasks 1-18 describe the quadlet and never name the exchange,
+routing key, or queue values, so the live sections are the only ones to fix.
+If that ever changes, prefix the historical line with `Historical:` rather
+than deleting the record.
 
 - [ ] **Step 9: Commit**
 
@@ -833,11 +862,35 @@ grep -n "defaultRabbitMQInputExchange\|defaultRabbitMQInputRoutingKey\|defaultRa
 grep -n "RABBITMQ_INPUT_EXCHANGE\|RABBITMQ_INPUT_ROUTING_KEY\|RABBITMQ_QUEUE" README.md AGENTS.md deploy/kubernetes/stocker-informer.yaml deploy/quadlet/.env.podman.example
 ```
 
-Expected: `stocker`, `stock.gems.v1.#`, `stock.gems.v1.informer` everywhere;
-the only `stock.summary` references left are inside historical plan text in
-`docs/deployment.md` above the manual check and the two superseded documents.
+Expected: `stocker`, `stock.gems.v1.#`, `stock.gems.v1.informer` everywhere.
 
-- [ ] **Step 5: Optional cluster validation**
+- [ ] **Step 5: Old-value grep gate**
+
+The old exchange and routing key both contain `stock.summary`, so one grep
+covers them. The old queue name needs targeted patterns because
+`stocker-informer` is also the application, image, and consumer-tag prefix; a
+bare word grep could never come back empty.
+
+```bash
+grep -rn "stock\.summary" \
+  internal/config/*.go internal/rabbitmq/*.go \
+  deploy/kubernetes/ deploy/quadlet/.env.podman.example \
+  README.md AGENTS.md docs/deployment.md ; echo "exchange/routing-key grep exit: $?"
+
+grep -rn 'defaultRabbitMQQueue.*stocker-informer\|Queue: *"stocker-informer"\|RABBITMQ_QUEUE=stocker-informer\|RABBITMQ_QUEUE: stocker-informer' \
+  internal/config/*.go internal/rabbitmq/*.go \
+  deploy/kubernetes/ deploy/quadlet/.env.podman.example ; echo "queue value grep exit: $?"
+
+grep -rn 'default `stocker-informer`\|`stocker-informer` queue\|Queue `stocker-informer`' \
+  README.md AGENTS.md docs/deployment.md ; echo "queue prose grep exit: $?"
+```
+
+Expected: all three greps print nothing and exit `1`. The two superseded
+documents are excluded on purpose: they are history. Any other
+`stocker-informer` hit (repository name, image name, package path, consumer
+tag) is the application name, not the old queue value.
+
+- [ ] **Step 6: Optional cluster validation**
 
 ```bash
 if command -v kubectl >/dev/null; then
@@ -849,7 +902,7 @@ fi
 Expected: four `created (dry run)` lines, or no output when `kubectl` is
 absent (this sandbox has none).
 
-- [ ] **Step 6: Confirm the branch state and push**
+- [ ] **Step 7: Confirm the branch state and push**
 
 ```bash
 git status --short --branch
@@ -857,12 +910,12 @@ git log --oneline origin/main..HEAD
 git push -u origin feature/kubernetes-conformity
 ```
 
-Expected: clean working tree; six task commits on top of `origin/main`; the
-push creates `origin/feature/kubernetes-conformity` and prints the new branch
-URL plus `branch 'feature/kubernetes-conformity' set up to track
-'origin/feature/kubernetes-conformity'`.
+Expected: clean working tree; the six task commits plus the design/plan and
+any review-fix commits on top of `origin/main`; the push updates the existing
+`origin/feature/kubernetes-conformity` and prints the branch URL plus the
+tracking message.
 
-- [ ] **Step 7: Record the pushed SHA**
+- [ ] **Step 8: Record the pushed SHA**
 
 ```bash
 git rev-parse HEAD
@@ -874,8 +927,10 @@ Expected: identical SHAs.
 ## Rollout (after merge, not part of the code tasks)
 
 1. Confirm the external producer publishes `stock.gems.v1.*` to `stocker`.
-2. Fill in `secret.yaml` and apply both files: `kubectl apply -f
-   deploy/kubernetes/stocker-informer.yaml -f deploy/kubernetes/secret.yaml`.
+2. Copy `secret.yaml` outside the repo, fill the copy, and apply both:
+   `kubectl apply -f deploy/kubernetes/stocker-informer.yaml -f
+   /tmp/stocker-informer-secret.yaml`. Never edit or `git add` the tracked
+   template with real values.
 3. Confirm `kubectl -n stocker get pods -l app=stocker-informer` shows the pod
    ready and the logs show `rabbitmq consumer connected` with the new
    exchange, routing key, and queue.
