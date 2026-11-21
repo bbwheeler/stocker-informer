@@ -466,10 +466,10 @@ func (identityRewriter) Rewrite(_ context.Context, summary string) (string, erro
 func testCfg() config.RabbitMQConfig {
 	return config.RabbitMQConfig{
 		URL:               "amqp://stocker:" + secretPassword + "@192.168.1.48:5672/",
-		InputExchange:     "stock.summary",
+		InputExchange:     "stocker",
 		InputExchangeType: "topic",
-		InputRoutingKey:   "stock.summary.available.v1",
-		Queue:             "stocker-informer",
+		InputRoutingKey:   "stock.gems.v1.#",
+		Queue:             "stock.gems.v1.informer",
 		Prefetch:          1,
 		ConnectTimeout:    10 * time.Second,
 	}
@@ -1290,7 +1290,7 @@ func TestHandleDeliveryAcksEveryOutcome(t *testing.T) {
 
 			c.handleDelivery(context.Background(), sess, amqp.Delivery{
 				DeliveryTag: 7,
-				RoutingKey:  "stock.summary.available.v1",
+				RoutingKey:  "stock.gems.v1.AAPL",
 				Redelivered: true,
 				Body:        tt.body,
 			})
@@ -1361,14 +1361,14 @@ func TestHandleDeliveryRewriteSuccessFields(t *testing.T) {
 
 	c.handleDelivery(context.Background(), sess, amqp.Delivery{
 		DeliveryTag: 11,
-		RoutingKey:  "stock.summary.available.v1",
+		RoutingKey:  "stock.gems.v1.AAPL",
 		Redelivered: true,
 		Body:        mustMarshal(t, &stockstorev1.Stock{Symbol: " AAPL ", Exchange: " NASDAQ "}),
 	})
 
 	rec := mustFindRecord(t, logRecords(t, buf.String()), "summary published on GoToSocial")
 	checks := map[string]any{
-		"routing_key":   "stock.summary.available.v1",
+		"routing_key":   "stock.gems.v1.AAPL",
 		"delivery_tag":  float64(11),
 		"redelivered":   true,
 		"symbol":        "AAPL",
@@ -1436,7 +1436,7 @@ func TestLogHygieneNeverLeaksSecrets(t *testing.T) {
 	done := runAsync(ctx, c)
 
 	waitFor(t, "consume to start", func() bool { return fch.consumeCount() > 0 })
-	fch.deliveries <- amqp.Delivery{DeliveryTag: 4, RoutingKey: "stock.summary.available.v1",
+	fch.deliveries <- amqp.Delivery{DeliveryTag: 4, RoutingKey: "stock.gems.v1.AAPL",
 		Body: mustMarshal(t, &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})}
 	waitFor(t, "publish", func() bool { return len(publisher.published()) == 1 })
 
