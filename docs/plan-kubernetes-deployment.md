@@ -1,5 +1,10 @@
 # Kubernetes Deployment Plan: stocker-informer
 
+> **Superseded 2026-11-21** by
+> [plan-kubernetes-conformity.md](plan-kubernetes-conformity.md). Do not
+> execute this plan against the current tree; it describes the retired
+> three-file layout and old RabbitMQ topology.
+
 Companion design doc: `docs/design-kubernetes-deployment.md` (source of truth
 for variable names, values, and rationale). Implement the tasks **one at a
 time, in order**; each task is self-contained.

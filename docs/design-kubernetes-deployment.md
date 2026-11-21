@@ -1,5 +1,10 @@
 # Kubernetes Deployment Design: stocker-informer
 
+> **Superseded 2026-11-21** by
+> [design-kubernetes-conformity.md](design-kubernetes-conformity.md). The
+> three-file layout, `app.kubernetes.io/*` labels, and `wheeli-registry`
+> pull secret described here are no longer used. Kept for history.
+
 ## Overview
 
 `stocker-informer` is a RabbitMQ consumer/worker: it consumes summary
