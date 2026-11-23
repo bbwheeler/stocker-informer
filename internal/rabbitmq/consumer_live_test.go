@@ -31,7 +31,7 @@ const (
 // unique timestamped direct exchange and queue, starts Consumer.Run with fake
 // collaborators, publishes one protobuf Stock, and asserts the publisher sees
 // the summary exactly once. The unique topology means a live run can never
-// touch the shared stock.summary exchange or the stocker-informer queue, and
+// touch the shared stocker exchange or the stock.gems.v1.informer queue, and
 // everything is deleted in cleanup. Skipped unless RABBITMQ_LIVE_TEST=1.
 func TestLiveConsumer(t *testing.T) {
 	if os.Getenv(liveTestEnv) != "1" {

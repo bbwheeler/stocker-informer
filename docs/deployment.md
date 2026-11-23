@@ -53,7 +53,7 @@ Mirror the `stocker-store` reference **and** keep the hardening. Rationale per l
 | `[Unit]` | *(absent)* | `After=network-online.target` | **Add it** | Correct ordering: don't start before the user network is up. Reference parity. |
 | `Image=` | `git.wheeli.ca/brian/stocker-informer:latest` | same shape | **Keep** | Must equal what `push.sh` publishes (Global Constraint). |
 | `EnvironmentFile=` | `%h/.config/stocker-informer/.env.podman` | same shape | **Keep** | Operator-owned env file path (Global Constraint). |
-| `PodmanArgs=--read-only` | **present** | *(absent)* | **Keep** | The runtime image is `gcr.io/distroless/static-debian12` running as non-root `65534` with a **static** (non-dynamic linker, no libc at runtime) binary. A read-only root FS is a genuine, zero-cost hardening win for a Go daemon that never writes files. Diverges from the reference on purpose — documented. |
+| `PodmanArgs=--read-only` | **present** | *(absent)* | **Keep** | The runtime image is `gcr.io/distroless/static-debian12` running as non-root `65532` with a **static** (non-dynamic linker, no libc at runtime) binary. A read-only root FS is a genuine, zero-cost hardening win for a Go daemon that never writes files. Diverges from the reference on purpose — documented. |
 | `PodmanArgs=--tmpfs=/tmp:rw,noexec,nosuid,size=64m` | **present** | *(absent)* | **Keep** | Lets the container have a small writable scratch `/tmp` while the rest stays read-only; `noexec,nosuid` block executing and setuid'ing files off it. Diverges from the reference on purpose — documented. |
 | `AutoUpdate=` | `local` | `registry` | **Change to `registry`** | `local` auto-updates from a **local** image file, which we no longer build on the host — it's meaningless here. `registry` re-pulls a new `:latest` on auto-update — correct for consuming a registry-published image. Matches reference. |
 | `[Service] Restart=` | `always` | `always` | **Keep** | — |
@@ -736,8 +736,8 @@ WantedBy=default.target
      protoc -I /home/brian/workspace/stocker-store -I /usr/include \
        --encode=stockstore.v1.Stock \
        /home/brian/workspace/stocker-store/proto/v1/stock_store.proto | base64 -w0)
-   rabbitmqadmin publish exchange=stock.summary \
-     routing_key=stock.summary.available.v1 \
+   rabbitmqadmin publish exchange=stocker \
+     routing_key=stock.gems.v1.AAPL \
      payload_encoding=base64 payload="$BODY"
    ```
 
@@ -747,7 +747,7 @@ WantedBy=default.target
    configuration loaded
    rabbitmq consumer started
    rabbitmq consumer connected
-   summary published on GoToSocial   symbol=AAPL exchange=NASDAQ routing_key=stock.summary.available.v1 rewritten=true
+   summary published on GoToSocial   symbol=AAPL exchange=NASDAQ routing_key=stock.gems.v1.AAPL rewritten=true
    ```
 
 4. Confirm the post on the instance matches the summary Markdown and the configured audience. For `direct`, confirm the mention is at the start.
@@ -782,9 +782,9 @@ section when the errors are sustained or the consumer stays silent.
 - Broker is running and reachable on the configured host/port; `amqps://` requires TLS on that port.
 - The vhost in `RABBITMQ_URL` exists (`/` by default).
 - The user in `RABBITMQ_URL` can **configure, write, and read** on the exchange and queue (declaration needs `configure`).
-- Exchange `stock.summary` exists as type `topic`, durable.
-- Queue `stocker-informer` exists as durable, non-exclusive, non-auto-delete.
-- Binding: exchange `stock.summary`, queue `stocker-informer`, routing key `stock.summary.available.v1`.
+- Exchange `stocker` exists as type `topic`, durable.
+- Queue `stock.gems.v1.informer` exists as durable, non-exclusive, non-auto-delete.
+- Binding: exchange `stocker`, queue `stock.gems.v1.informer`, routing key `stock.gems.v1.#`.
 - No declaration mismatch (406) from a previous deployment with different flags.
 - The producer (`stocker-summarizer`) publishes to the same exchange/routing key and its messages are not expiring before consumption.
 
@@ -797,7 +797,7 @@ rabbitmqctl list_bindings source_name destination_name routing_key
 rabbitmqctl list_connections name peer_host state
 rabbitmqctl list_channels connection number consumer_count messages_unacknowledged
 # Publish one test message (management UI or rabbitmqadmin also work):
-#   exchange stock.summary, routing key stock.summary.available.v1,
+#   exchange stocker, routing key stock.gems.v1.AAPL,
 #   payload = protobuf stockstore.v1.Stock{symbol:"AAPL",exchange:"NASDAQ"}
 ```
 

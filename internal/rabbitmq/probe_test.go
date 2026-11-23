@@ -231,7 +231,7 @@ func TestProbeCheckSuccess(t *testing.T) {
 // TestProbeCheckExchangeNotFound asserts a 404 on the exchange is reported with
 // the exchange name, skips the queue, and still closes both handles.
 func TestProbeCheckExchangeNotFound(t *testing.T) {
-	fch := &fakeProbeChannel{exchangeErr: notFoundError("no exchange 'stock.summary' in vhost '/'")}
+	fch := &fakeProbeChannel{exchangeErr: notFoundError("no exchange 'stocker' in vhost '/'")}
 	fconn := &fakeProbeConnection{ch: fch}
 	p := newTestProbe(t, func(context.Context, string, time.Duration) (probeConnection, error) {
 		return fconn, nil
@@ -241,7 +241,7 @@ func TestProbeCheckExchangeNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("Check() = nil, want an exchange error")
 	}
-	if !strings.Contains(err.Error(), `exchange "stock.summary"`) {
+	if !strings.Contains(err.Error(), `exchange "stocker"`) {
 		t.Errorf("error %q does not name the exchange", err)
 	}
 	var amqpErr *amqp.Error
@@ -262,7 +262,7 @@ func TestProbeCheckExchangeNotFound(t *testing.T) {
 // TestProbeCheckQueueNotFound asserts a 404 on the queue is reported with the
 // queue name.
 func TestProbeCheckQueueNotFound(t *testing.T) {
-	fch := &fakeProbeChannel{queueErr: notFoundError("no queue 'stocker-informer' in vhost '/'")}
+	fch := &fakeProbeChannel{queueErr: notFoundError("no queue 'stock.gems.v1.informer' in vhost '/'")}
 	fconn := &fakeProbeConnection{ch: fch}
 	p := newTestProbe(t, func(context.Context, string, time.Duration) (probeConnection, error) {
 		return fconn, nil
@@ -272,7 +272,7 @@ func TestProbeCheckQueueNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("Check() = nil, want a queue error")
 	}
-	if !strings.Contains(err.Error(), `queue "stocker-informer"`) {
+	if !strings.Contains(err.Error(), `queue "stock.gems.v1.informer"`) {
 		t.Errorf("error %q does not name the queue", err)
 	}
 	if got := fch.closes(); got != 1 {

@@ -20,13 +20,16 @@ internal/rabbitmq/        # supervised consumer, session, passive-topology probe
 internal/rewriter/        # Ollama /api/generate adapter + Rewriter interface
 internal/summarystore/    # Garage/S3 summary reader (canonical unrooted key only)
 internal/messenger/       # GoToSocial publisher + Publisher interface
+deploy/kubernetes/        # gold-standard manifests: stocker-informer.yaml + secret.yaml template
 deploy/quadlet/           # single rootless quadlet + .env.podman.example template
-docs/                     # operator guide (deployment.md)
+docs/                     # operator guide (deployment.md), design-kubernetes-conformity.md,
+                          # plan-kubernetes-conformity.md, and the superseded
+                          # design-kubernetes-deployment.md / plan-kubernetes-deployment.md kept for history
 ```
 
 ## Architecture
 
-`main()` loads config → builds the S3 summary store → conditionally builds the Ollama rewriter → builds the audience-aware GoToSocial publisher → constructs the RabbitMQ consumer and readiness probe. The consumer declares the durable input exchange (`RABBITMQ_INPUT_EXCHANGE`, default `stock.summary`), its own durable non-exclusive queue (`RABBITMQ_QUEUE`, default `stocker-informer`), and the binding on every (re)connect, then consumes with manual acknowledgements (`autoAck=false`) and `Qos(RABBITMQ_PREFETCH, 0, false)`. It decodes each message body as protobuf `stockstore.v1.Stock`, reads `[S3_PATH_PREFIX/]{EXCHANGE}/{SYMBOL}/summary.md` from Garage/S3, rewrites the trimmed summary as a Cora-9 news report when `OLLAMA_ENABLED=true` (publishing the original summary if rewriting fails), and POSTs the resulting Markdown to `{GOTOSOCIAL_INSTANCE}/api/v1/statuses` with the configured audience (`global`/`local`/`direct`). `amqp091-go` does not reconnect on its own, so `Run` supervises the whole session with a deterministic `1s`→`30s` exponential backoff and retries broker failures forever. Every completed pipeline outcome — decode failure, missing/empty summary, rewrite fallback, publish success or failure — acks the delivery; a delivery interrupted by shutdown is nacked with requeue instead.
+`main()` loads config → builds the S3 summary store → conditionally builds the Ollama rewriter → builds the audience-aware GoToSocial publisher → constructs the RabbitMQ consumer and readiness probe. The consumer declares the durable input exchange (`RABBITMQ_INPUT_EXCHANGE`, default `stocker`), its own durable non-exclusive queue (`RABBITMQ_QUEUE`, default `stock.gems.v1.informer`), and the binding on every (re)connect, then consumes with manual acknowledgements (`autoAck=false`) and `Qos(RABBITMQ_PREFETCH, 0, false)`. It decodes each message body as protobuf `stockstore.v1.Stock`, reads `[S3_PATH_PREFIX/]{EXCHANGE}/{SYMBOL}/summary.md` from Garage/S3, rewrites the trimmed summary as a Cora-9 news report when `OLLAMA_ENABLED=true` (publishing the original summary if rewriting fails), and POSTs the resulting Markdown to `{GOTOSOCIAL_INSTANCE}/api/v1/statuses` with the configured audience (`global`/`local`/`direct`). `amqp091-go` does not reconnect on its own, so `Run` supervises the whole session with a deterministic `1s`→`30s` exponential backoff and retries broker failures forever. Every completed pipeline outcome — decode failure, missing/empty summary, rewrite fallback, publish success or failure — acks the delivery; a delivery interrupted by shutdown is nacked with requeue instead.
 
 ## Environment variables
 
@@ -56,10 +59,10 @@ Optional:
 - `OLLAMA_MAX_TOKENS` — default `1024`; sets `num_predict`; must be an integer `> 0`
 - `OLLAMA_MAX_OUTPUT_CHARS` — default `0` (unlimited); must be an integer `>= 0`; over the cap falls back to the original
 - `RABBITMQ_URL` — default `amqp://<user>:<password>@192.168.1.48:5672/` (credentials redacted here; the built-in default embeds real shared-broker credentials); must be an absolute `amqp://`/`amqps://` URI with a host and, when a port is given, a numeric port in `1..65535`; secret-bearing, never logged raw (logs use `config.RedactedAMQPURL`)
-- `RABBITMQ_INPUT_EXCHANGE` — default `stock.summary`; present-but-blank is an error; max 255 bytes
+- `RABBITMQ_INPUT_EXCHANGE` — default `stocker`; present-but-blank is an error; max 255 bytes
 - `RABBITMQ_INPUT_EXCHANGE_TYPE` — default `topic`; one of `direct`|`topic`|`fanout`|`headers`; blank selects `topic`
-- `RABBITMQ_INPUT_ROUTING_KEY` — default `stock.summary.available.v1`; present-but-blank is an error; max 255 bytes
-- `RABBITMQ_QUEUE` — default `stocker-informer`; present-but-blank is an error; max 255 bytes
+- `RABBITMQ_INPUT_ROUTING_KEY` — default `stock.gems.v1.#`; present-but-blank is an error; max 255 bytes
+- `RABBITMQ_QUEUE` — default `stock.gems.v1.informer`; present-but-blank is an error; max 255 bytes
 - `RABBITMQ_PREFETCH` — default `1`; integer in `[1, 65535]`
 - `RABBITMQ_CONNECT_TIMEOUT_SECONDS` — default `10`; integer in `[1, 300]`
 

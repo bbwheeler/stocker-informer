@@ -20,7 +20,7 @@ The producer (`stocker-summarizer`) writes the summary object and emits a minima
 - Structured JSON logging via `log/slog` to stdout.
 - `/health` endpoint on `:8080`.
 - Static, non-root distroless container image.
-- Single rootless podman quadlet (systemd `--user`) deployment; image published to `git.wheeli.ca/brian` via `deploy/push.sh`.
+- Single rootless podman quadlet (systemd `--user`) deployment; image published to `git.wheeli.ca/brian` via `deploy/push.sh`; Kubernetes manifests live in `deploy/kubernetes/` (Namespace + ConfigMap + Deployment, conforming to `stocker-store`).
 - Graceful shutdown on `SIGINT` / `SIGTERM`.
 
 ## At a glance
@@ -32,7 +32,7 @@ The producer (`stocker-summarizer`) writes the summary object and emits a minima
 | Key dependencies | `github.com/rabbitmq/amqp091-go v1.16.0`; AWS SDK for Go v2 (`config`, `credentials`, `service/s3`); `git.wheeli.ca/brian/stocker-store/proto/v1`; `google.golang.org/protobuf v1.36.12`; the Ollama HTTP API via the standard library (no additional module) |
 | Configuration | 6 required environment variables + 21 optional |
 | Build / publish | `go build ./cmd/server/` / `./deploy/push.sh` (→ `podman build` + `podman push` to `git.wheeli.ca/brian/stocker-informer:latest`) |
-| Container base | `golang:1.25-bookworm` build → `gcr.io/distroless/static-debian12` runtime, user `nobody`/`65534` |
+| Container base | `golang:1.25-bookworm` build → `gcr.io/distroless/static-debian12` runtime, user `nonroot`/`65532` |
 | Registry image | `git.wheeli.ca/brian/stocker-informer:latest` |
 | Logging | JSON to stdout |
 | Health | `/health` on `:8080` |
@@ -50,10 +50,10 @@ go build -o stocker-informer ./cmd/server/
 
 # RabbitMQ (all optional; defaults shown, except the placeholder credential)
 export RABBITMQ_URL=amqp://user:password@localhost:5672/
-export RABBITMQ_INPUT_EXCHANGE=stock.summary
+export RABBITMQ_INPUT_EXCHANGE=stocker
 export RABBITMQ_INPUT_EXCHANGE_TYPE=topic
-export RABBITMQ_INPUT_ROUTING_KEY=stock.summary.available.v1
-export RABBITMQ_QUEUE=stocker-informer
+export RABBITMQ_INPUT_ROUTING_KEY=stock.gems.v1.#
+export RABBITMQ_QUEUE=stock.gems.v1.informer
 export RABBITMQ_PREFETCH=1
 export RABBITMQ_CONNECT_TIMEOUT_SECONDS=10
 
@@ -82,8 +82,8 @@ The binary runs until stopped. Press `Ctrl-C` (`SIGINT`); it logs `shutting down
 ## Prerequisites
 
 - **Local build/run:** Go 1.25 or newer.
-- A reachable **RabbitMQ** broker (vhost `/` by default). The service declares the durable `stock.summary` exchange, its own durable `stocker-informer` queue, and the binding, so the broker user needs **configure**, **write**, and **read** permission on those objects.
-- A **producer** that publishes protobuf `stockstore.v1.Stock` bodies to the same exchange under the configured routing key (operationally `stock.summary` / `stock.summary.available.v1`, written by `stocker-summarizer`).
+- A reachable **RabbitMQ** broker (vhost `/` by default). The service declares the durable `stocker` exchange, its own durable `stock.gems.v1.informer` queue, and the binding, so the broker user needs **configure**, **write**, and **read** permission on those objects.
+- A **producer** that publishes protobuf `stockstore.v1.Stock` bodies to the `stocker` exchange under the `stock.gems.v1.#` routing key (operationally `stock.gems.v1.*`, written by `stocker-summarizer`). The exchange is shared with `stocker-store` and declared with the same `topic`/durable arguments.
 - A reachable **Garage/S3** bucket that contains `summary.md` objects under the documented layout, plus static credentials with read access.
 - A reachable **GoToSocial** instance with a valid auth token.
 - A reachable **Ollama** instance (default `http://192.168.1.71:11434`) with the configured `OLLAMA_MODEL` already pulled (`ollama list`). If it is unreachable, the original summary is still published.
@@ -124,9 +124,9 @@ podman build -t stocker-informer:latest -f Containerfile .
 The build is two-stage:
 
 - **Build stage:** `FROM golang:1.25-bookworm`, copies `go.mod go.sum`, sets `GOPRIVATE=git.wheeli.ca` (the `stocker-store` module is fetched directly from `git.wheeli.ca`), runs `go mod download`, copies the source, then runs `CGO_ENABLED=0 go build -o /out/stocker-informer ./cmd/server`.
-- **Runtime stage:** `FROM gcr.io/distroless/static-debian12`, copies the binary to `/stocker-informer`, runs as `USER 65534:65534` (`nobody`), with `ENTRYPOINT ["/stocker-informer"]`.
+- **Runtime stage:** `FROM gcr.io/distroless/static-debian12`, copies the binary to `/stocker-informer`, runs as `USER 65532:65532` (`nonroot`), with `ENTRYPOINT ["/stocker-informer"]`.
 
-CGO is disabled, the runtime base is static distroless, and the container runs as a non-root user (`65534`). No credentials are baked into the image; the builder needs network and git access to `git.wheeli.ca` to resolve the private module.
+CGO is disabled, the runtime base is static distroless, and the container runs as a non-root user (`65532`). No credentials are baked into the image; the builder needs network and git access to `git.wheeli.ca` to resolve the private module.
 
 ## Configuration
 
@@ -143,10 +143,10 @@ Secret values (`GOTOSOCIAL_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) are never i
 | Variable | Required / default | Secret | Meaning |
 | --- | --- | --- | --- |
 | `RABBITMQ_URL` | optional, default `amqp://<user>:<password>@192.168.1.48:5672/` (credentials redacted here; the built-in default embeds real shared-broker credentials) | **yes** (usually embeds credentials) | AMQP broker URL passed verbatim to `amqp.DialConfig`. Trimmed; absent or blank uses the built-in shared-test-broker default. Must be an absolute `amqp://` or `amqps://` URI with a non-empty host; a port, if present, must be numeric `1`–`65535`. Never included in errors or logs; logs show only the redacted `scheme://host[:port]/vhost`. |
-| `RABBITMQ_INPUT_EXCHANGE` | optional, default `stock.summary` | no | Exchange the consumer declares and binds the queue to. When the variable is **present**, the trimmed value must be non-empty and at most 255 bytes; an explicitly blank value is an error, not a fallback to the default. |
+| `RABBITMQ_INPUT_EXCHANGE` | optional, default `stocker` | no | Exchange the consumer declares and binds the queue to. When the variable is **present**, the trimmed value must be non-empty and at most 255 bytes; an explicitly blank value is an error, not a fallback to the default. |
 | `RABBITMQ_INPUT_EXCHANGE_TYPE` | optional, default `topic` | no | `direct` \| `topic` \| `fanout` \| `headers` (trimmed, lower-cased). Blank — present or absent — selects `topic`. |
-| `RABBITMQ_INPUT_ROUTING_KEY` | optional, default `stock.summary.available.v1` | no | Binding key from the exchange to the queue, and the key the producer must publish under. Same present/non-blank/255-byte rule as the exchange. |
-| `RABBITMQ_QUEUE` | optional, default `stocker-informer` | no | Durable, non-exclusive, non-auto-delete queue the consumer declares and consumes. Same present/non-blank/255-byte rule as the exchange. |
+| `RABBITMQ_INPUT_ROUTING_KEY` | optional, default `stock.gems.v1.#` | no | Binding key from the exchange to the queue, and the key the producer must publish under. Same present/non-blank/255-byte rule as the exchange. |
+| `RABBITMQ_QUEUE` | optional, default `stock.gems.v1.informer` | no | Durable, non-exclusive, non-auto-delete queue the consumer declares and consumes. Same present/non-blank/255-byte rule as the exchange. |
 | `RABBITMQ_PREFETCH` | optional, default `1` | no | Per-consumer QoS prefetch count (`Qos(prefetch, 0, false)`). Absent or blank uses the default; otherwise an integer in `[1, 65535]` (the AMQP prefetch field is 16 bits). |
 | `RABBITMQ_CONNECT_TIMEOUT_SECONDS` | optional, default `10` | no | Connect timeout in seconds for each attempt: it bounds the TCP dial and — through a connection deadline — the AMQP/TLS handshake, so a broker that accepts TCP but stalls cannot hang a connect. Absent or blank uses the default; otherwise an integer in `[1, 300]`. |
 | `GOTOSOCIAL_INSTANCE` | **Required** | no | Absolute `http(s)` base URL of the instance (scheme + host), e.g. `https://wheeli.social`. The publisher POSTs to `{GOTOSOCIAL_INSTANCE}/api/v1/statuses`. |
@@ -226,8 +226,8 @@ message ScoreEntry {
 ### Producer, exchange, and routing key
 
 - Producer: `stocker-summarizer`.
-- Exchange: `stock.summary`, declared durable with type `topic` (configurable through `RABBITMQ_INPUT_EXCHANGE` / `RABBITMQ_INPUT_EXCHANGE_TYPE`).
-- Routing key: `stock.summary.available.v1`, configured through `RABBITMQ_INPUT_ROUTING_KEY`.
+- Exchange: `stocker`, declared durable with type `topic` (configurable through `RABBITMQ_INPUT_EXCHANGE` / `RABBITMQ_INPUT_EXCHANGE_TYPE`).
+- Routing key: `stock.gems.v1.#`, configured through `RABBITMQ_INPUT_ROUTING_KEY`.
 
 ### Decode behaviour
 
@@ -487,15 +487,15 @@ Representative log lines: `starting stocker-informer`, `configuration loaded`, `
 ### RabbitMQ consumer behaviour
 
 - Topology, declared on every (re)connect:
-  - Exchange `RABBITMQ_INPUT_EXCHANGE` (default `stock.summary`) with type `RABBITMQ_INPUT_EXCHANGE_TYPE` (default `topic`), `durable=true`, `autoDelete=false`, `internal=false`.
-  - Queue `RABBITMQ_QUEUE` (default `stocker-informer`), `durable=true`, `autoDelete=false`, `exclusive=false`.
-  - Binding queue ← `RABBITMQ_INPUT_ROUTING_KEY` (default `stock.summary.available.v1`) → exchange.
+  - Exchange `RABBITMQ_INPUT_EXCHANGE` (default `stocker`) with type `RABBITMQ_INPUT_EXCHANGE_TYPE` (default `topic`), `durable=true`, `autoDelete=false`, `internal=false`.
+  - Queue `RABBITMQ_QUEUE` (default `stock.gems.v1.informer`), `durable=true`, `autoDelete=false`, `exclusive=false`.
+  - Binding queue ← `RABBITMQ_INPUT_ROUTING_KEY` (default `stock.gems.v1.#`) → exchange.
 - `Qos(RABBITMQ_PREFETCH, 0, false)` — per consumer, not global; the default `1` keeps one in-flight message per replica.
 - `Consume(queue, "stocker-informer-<pid>", autoAck=false, exclusive=false, noLocal=false, noWait=false, nil)`: acknowledgement is manual.
 - Each body is decoded as protobuf `stockstore.v1.Stock`, the summary is read from S3, rewritten as a Cora-9 report when enabled (falling back to the original on any rewrite error), and the resulting text is published.
 - `amqp091-go` does **not** reconnect automatically. The consumer supervises dial → channel → topology → QoS → consume and retries forever with deterministic exponential backoff: `1s`, `2s`, `4s`, … capped at `30s`. A session that delivered at least one message resets the failure counter, so a long healthy connection reconnects after `1s`.
 - A connect failure logs `rabbitmq connect failed, backing off` (the first failure and every tenth at `Warn`, the rest at `Debug`) and never crashes the process. A lost session logs `rabbitmq consumer connection lost`; the first connection logs `rabbitmq consumer connected` and later ones `rabbitmq consumer reconnected`.
-- Competing consumers may share the durable queue: several replicas consume from `stocker-informer` without losing messages, and `RABBITMQ_PREFETCH=1` plus the synchronous pipeline bounds each replica to one in-flight delivery.
+- Competing consumers may share the durable queue: several replicas consume from `stock.gems.v1.informer` without losing messages, and `RABBITMQ_PREFETCH=1` plus the synchronous pipeline bounds each replica to one in-flight delivery.
 - Declaration mismatches are configuration errors that require operator action: a `406 PRECONDITION_FAILED` means the existing exchange or queue has different type/durability/flags/arguments than configured, so the consumer retries with backoff but cannot fix it itself. A `403 ACCESS_REFUSED` means the broker user lacks permission on the vhost. See [docs/deployment.md#troubleshooting-rabbitmq-connectivity](docs/deployment.md#troubleshooting-rabbitmq-connectivity).
 
 ### GoToSocial publisher behaviour
@@ -529,7 +529,7 @@ Every completed pipeline outcome acks the delivery:
 ### Health endpoint
 
 - `GET /health` on `:8080`.
-- A dedicated probe (its own connection, never the consumer's) opens a short-lived session, passively declares the configured exchange (checking its type and durability) and queue (checking `durable=true`, non-exclusive), then closes both. Passive declares create, bind, consume, and publish nothing.
+- A dedicated probe (its own connection, never the consumer's) opens a short-lived session, passively declares the configured exchange and queue to verify they exist, then closes both. Passive declaration checks existence only — not the objects' arguments — so it cannot prove the exchange type, durability, or the queue's flags. Passive declares create, bind, consume, and publish nothing.
 - Each attempt is bounded by a `5s` timeout; retries back off `1s` doubling to `30s`, and a ready probe re-checks every `60s`.
 - Returns `503` with body `{"status":"starting","version":"..."}` until the first successful verification, then `200` with `{"status":"ok","version":"..."}`. Readiness is sticky thereafter: a later loss logs `rabbitmq connectivity lost` and a recovery logs `rabbitmq connectivity restored`, but the endpoint does **not** flip back to `503` (by design, to avoid restart loops — watch the logs).
 - Expected startup noise: `rabbitmq connectivity probe failed` with `NOT_FOUND` (404) until the consumer has declared the topology, and `PRECONDITION_FAILED` (406) when an existing object has different flags.
@@ -549,12 +549,12 @@ Caveats:
 ### How to verify it's working
 
 1. `podman logs stocker-informer` (or the process stdout) shows `starting stocker-informer` then `configuration loaded` then `rabbitmq consumer started`. `/health` stays `503` (`{"status":"starting"}`) until the probe successfully passive-declares the exchange and queue; `rabbitmq connectivity verified` appears in the log immediately before readiness flips to `200` (`{"status":"ok"}`).
-2. Write a `NASDAQ/AAPL/summary.md` to the bucket, then publish one protobuf `Stock{symbol:"AAPL",exchange:"NASDAQ"}` body to the `stock.summary` exchange with routing key `stock.summary.available.v1` (management UI, `rabbitmqadmin publish`, or a small Go producer). The log shows `summary published on GoToSocial` with `rewritten=true`, and the status reads as a Cora-9 news report.
+2. Write a `NASDAQ/AAPL/summary.md` to the bucket, then publish one protobuf `Stock{symbol:"AAPL",exchange:"NASDAQ"}` body to the `stocker` exchange with routing key `stock.gems.v1.AAPL` (management UI, `rabbitmqadmin publish`, or a small Go producer). The log shows `summary published on GoToSocial` with `rewritten=true`, and the status reads as a Cora-9 news report.
 3. Rewrite fallback check: stop Ollama (or point `OLLAMA_BASE_URL` at an unused port); the same signal logs `rewrite failed, publishing original summary`, the original summary appears, and the success line shows `rewritten=false`. Set `OLLAMA_ENABLED=false` to confirm the same publish without a warning.
 4. Confirm the status appears on the GoToSocial instance according to the configured audience.
 5. Quick negative test: run the binary with one required env var deliberately left empty — it should fail fast with a `load config: invalid configuration: ...` JSON fatal-error line and exit `1`.
 6. S3 path check: with a missing summary, the log shows `summary not found` and the consumer continues (delivery acked).
-7. Restart check: stop and start the service. The durable `stocker-informer` queue retains messages published while it was down, and any unacked deliveries from the previous run are redelivered (flagged `redelivered=true`), so expect a possible duplicate publication.
+7. Restart check: stop and start the service. The durable `stock.gems.v1.informer` queue retains messages published while it was down, and any unacked deliveries from the previous run are redelivered (flagged `redelivered=true`), so expect a possible duplicate publication.
 
 ## Repository structure
 
@@ -567,7 +567,11 @@ stocker-informer/
 ├── go.sum
 ├── README.md
 ├── docs/
-│   └── deployment.md
+│   ├── deployment.md
+│   ├── design-kubernetes-conformity.md
+│   ├── design-kubernetes-deployment.md
+│   ├── plan-kubernetes-conformity.md
+│   └── plan-kubernetes-deployment.md
 ├── cmd/server/main.go
 ├── internal/config/config.go
 ├── internal/rabbitmq/consumer.go
@@ -579,6 +583,9 @@ stocker-informer/
 ├── internal/rewriter/rewriter.go
 ├── internal/summarystore/store.go
 └── deploy/
+    ├── kubernetes/
+    │   ├── stocker-informer.yaml
+    │   └── secret.yaml
     ├── push.sh
     └── quadlet/
         ├── .env.podman.example
