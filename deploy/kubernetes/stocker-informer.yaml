@@ -15,19 +15,18 @@ data:
   RABBITMQ_QUEUE: stock.gems.v1.informer
   RABBITMQ_PREFETCH: "1"
   RABBITMQ_CONNECT_TIMEOUT_SECONDS: "10"
-  S3_ENDPOINT: http://192.168.1.31:3900
-  S3_REGION: us-east-1
+  S3_ENDPOINT: http://192.168.1.31:30188
+  S3_REGION: garage
   S3_TIMEOUT_SECONDS: "10"
-  S3_BUCKET: REPLACE_ME
+  S3_BUCKET: stocker
   GOTOSOCIAL_INSTANCE: https://wheeli.social
   GOTOSOCIAL_USER: bot
-  GOTOSOCIAL_AUDIENCE: global
+  GOTOSOCIAL_AUDIENCE: local
   OLLAMA_ENABLED: "true"
   OLLAMA_BASE_URL: http://192.168.1.71:11434
-  OLLAMA_MODEL: gemma4:26b
-  OLLAMA_TIMEOUT_SECONDS: "120"
-  OLLAMA_TEMPERATURE: "0.7"
-  OLLAMA_MAX_TOKENS: "1024"
+  OLLAMA_MODEL: qwen3.6:35b
+  OLLAMA_TIMEOUT_SECONDS: "3600"
+  OLLAMA_MAX_TOKENS: "131072"
   OLLAMA_MAX_OUTPUT_CHARS: "0"
 ---
 apiVersion: apps/v1
@@ -68,7 +67,7 @@ spec:
               cpu: 50m
               memory: 128Mi
             limits:
-              memory: 512Mi
+              memory: 2048Mi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
